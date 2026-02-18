@@ -10,8 +10,8 @@ Measured on a single NVIDIA RTX 4090 GPU:
 
 | Position | Depth | Nodes | Speed |
 |---|---|---|---|
-| Starting position | 9 | 2,439,530,234,167 | ~250 billion nps |
-| [Position 2](https://www.chessprogramming.org/Perft_Results#Position_2) (Kiwipete) | 7 | 374,190,009,323 | ~616 billion nps |
+| Starting position | 9 | 2,439,530,234,167 | ~400 billion nps |
+| [Position 2](https://www.chessprogramming.org/Perft_Results#Position_2) (Kiwipete) | 7 | 374,190,009,323 | ~614 billion nps |
 | [Position 3](https://www.chessprogramming.org/Perft_Results#Position_3) | 7 | 178,633,661 | - |
 
 ## How it works
@@ -27,9 +27,10 @@ This loop repeats until a configurable "launch depth", after which the remaining
 
 ### Key design choices
 
+- **Quad-bitboard representation** - Each position is stored as 4 x uint64 (32 bytes) encoding piece type + color per square, with game state in a separate 2-byte struct. This gives power-of-2 struct size for GPU coalescing.
 - **Host-driven BFS** with one kernel launch per phase per level (no CUDA Dynamic Parallelism)
 - **Merge-path interval expand** (inspired by [moderngpu](https://github.com/moderngpu/moderngpu)) for perfect load balancing across CTAs
-- **Bump allocator** for GPU memory - a single 3 GB pre-allocated buffer avoids per-level `cudaMalloc`/`cudaFree` overhead
+- **Bump allocator** for GPU memory - a single pre-allocated buffer avoids per-level `cudaMalloc`/`cudaFree` overhead
 - **Bitboard move generation** using magic bitboards for sliding pieces
 
 ## Building
@@ -68,9 +69,9 @@ The program prints cumulative perft results for depth 1 through the specified ma
 | `perft.cu` | Entry point, GPU init, FEN parsing, main loop |
 | `perft_bb.h` | Host-driven BFS implementation, GPU kernels, merge-path interval expand |
 | `launcher.h` | GPU initialization, launch depth estimation, CPU perft fallback |
-| `MoveGeneratorBitboard.h` | Bitboard-based legal move generation (~3400 lines) |
-| `chess.h` | Board representation (`HexaBitBoardPosition`), move structures |
-| `switches.h` | Compile-time constants (`BLOCK_SIZE`, `IE_VT`, memory sizes) |
+| `MoveGeneratorBitboard.h` | Bitboard-based legal move generation |
+| `chess.h` | Board representation (`QuadBitBoard`, `GameState`), move structures |
+| `switches.h` | Compile-time constants (`BLOCK_SIZE`, memory sizes, lookup table options) |
 | `utils.h` / `util.cpp` | Board display, FEN parsing, timer utilities |
 | `GlobalVars.cpp` | Magic tables, attack tables |
 | `Magics.cpp` | Magic number generation for sliding piece attacks |
