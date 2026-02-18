@@ -332,19 +332,67 @@ __global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, Game
 }
 
 // Kernel: generate moves for each position (uses inclusive prefix sums for offsets)
+// Uses shared memory staging for coalesced global writes.
+// Without this, each thread writes 2-byte CMoves to scattered global addresses
+// (6.25% sector utilization, 85% wasted traffic). With staging, the CTA
+// cooperatively copies the compacted move buffer to global memory at 100% utilization.
+#define SMEM_MOVES_CAPACITY (BLOCK_SIZE * 48)
+
 __global__ void generate_moves_kernel(QuadBitBoard *positions, GameState *states,
                                        CMove *generatedMovesBase, int *inclPrefixSums, int nThreads)
 {
+    __shared__ uint16 smemMovesRaw[SMEM_MOVES_CAPACITY];
+    CMove *smemMoves = (CMove *)smemMovesRaw;
+
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+
+    // Compute this CTA's output range from the inclusive prefix sums
+    int firstIndex = blockIdx.x * blockDim.x;
+    int lastIndex = firstIndex + blockDim.x - 1;
+    if (lastIndex >= nThreads) lastIndex = nThreads - 1;
+
+    int blockGlobalStart = (firstIndex == 0) ? 0 : inclPrefixSums[firstIndex - 1];
+    int totalBlockMoves = inclPrefixSums[lastIndex] - blockGlobalStart;
+
+    // Per-thread: derive local offset within shared buffer from global prefix sums
+    int localOffset = 0;
+    int myMoveCount = 0;
+
+    QuadBitBoard pos;
+    GameState gs;
 
     if (index < nThreads)
     {
-        QuadBitBoard pos = loadQuadBB(&positions[index]);
-        GameState gs = states[index];
-        int offset = (index == 0) ? 0 : inclPrefixSums[index - 1];
-        CMove *genMoves = generatedMovesBase + offset;
-        uint8 color = gs.chance;
-        generateMoves(&pos, &gs, color, genMoves);
+        pos = loadQuadBB(&positions[index]);
+        gs = states[index];
+        int myGlobalStart = (index == 0) ? 0 : inclPrefixSums[index - 1];
+        myMoveCount = inclPrefixSums[index] - myGlobalStart;
+        localOffset = myGlobalStart - blockGlobalStart;
+    }
+
+    if (totalBlockMoves <= SMEM_MOVES_CAPACITY)
+    {
+        // Fast path: generate into shared memory, then coalesced copy to global
+        if (index < nThreads && myMoveCount > 0)
+        {
+            generateMoves(&pos, &gs, gs.chance, &smemMoves[localOffset]);
+        }
+        __syncthreads();
+
+        // Cooperative coalesced copy from shared memory to global memory
+        for (int i = tid; i < totalBlockMoves; i += blockDim.x)
+        {
+            generatedMovesBase[blockGlobalStart + i] = smemMoves[i];
+        }
+    }
+    else
+    {
+        // Fallback for rare blocks with very many moves: direct scattered writes
+        if (index < nThreads && myMoveCount > 0)
+        {
+            generateMoves(&pos, &gs, gs.chance, &generatedMovesBase[blockGlobalStart + localOffset]);
+        }
     }
 }
 
