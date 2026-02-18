@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
 project(perft_gpu LANGUAGES CXX CUDA)
 
-set(CMAKE_CUDA_ARCHITECTURES 80)
+set(CMAKE_CUDA_ARCHITECTURES "80;100")
 set(CMAKE_CXX_STANDARD 17)
 
 add_executable(perft_gpu

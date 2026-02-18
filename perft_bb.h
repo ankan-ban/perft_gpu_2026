@@ -79,7 +79,36 @@ uint64 perft_bb(QuadBitBoard *pos, GameState *gs, uint32 depth)
 #define WARP_SIZE 32
 
 #define ALIGN_UP(addr, align)   (((addr) + (align) - 1) & (~((align) - 1)))
-#define MEM_ALIGNMENT 16
+#define MEM_ALIGNMENT 32    // 32-byte alignment needed for v4.u64 loads/stores
+
+// -------------------------------------------------------------------------
+// 256-bit load/store helpers for QuadBitBoard
+// On Blackwell+ (SM100), use ld.global.v4.u64 / st.global.v4.u64 for
+// single-instruction 32-byte transfers. Falls back to default on older GPUs.
+// -------------------------------------------------------------------------
+
+__device__ __forceinline__ QuadBitBoard loadQuadBB(const QuadBitBoard *ptr)
+{
+    QuadBitBoard ret;
+#if __CUDA_ARCH__ >= 1000
+    asm volatile("ld.global.v4.u64 {%0,%1,%2,%3}, [%4];"
+        : "=l"(ret.bb[0]), "=l"(ret.bb[1]), "=l"(ret.bb[2]), "=l"(ret.bb[3])
+        : "l"(ptr));
+#else
+    ret = *ptr;
+#endif
+    return ret;
+}
+
+__device__ __forceinline__ void storeQuadBB(QuadBitBoard *ptr, const QuadBitBoard &val)
+{
+#if __CUDA_ARCH__ >= 1000
+    asm volatile("st.global.v4.u64 [%0], {%1,%2,%3,%4};"
+        :: "l"(ptr), "l"(val.bb[0]), "l"(val.bb[1]), "l"(val.bb[2]), "l"(val.bb[3]));
+#else
+    *ptr = val;
+#endif
+}
 
 // makes the given move on the given position
 __device__ __forceinline__ void makeMove(QuadBitBoard *pos, GameState *gs, CMove move, int chance)
@@ -288,7 +317,7 @@ __global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, Game
     if (index < nThreads)
     {
         int parentIndex = indices[index];
-        QuadBitBoard pos = parentBoards[parentIndex];
+        QuadBitBoard pos = loadQuadBB(&parentBoards[parentIndex]);
         GameState gs = parentStates[parentIndex];
         CMove move = moves[index];
 
@@ -296,7 +325,7 @@ __global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, Game
         makeMove(&pos, &gs, move, color);
         nMoves = countMoves(&pos, &gs, !color);
 
-        outPositions[index] = pos;
+        storeQuadBB(&outPositions[index], pos);
         outStates[index] = gs;
         moveCounts[index] = nMoves;
     }
@@ -310,7 +339,7 @@ __global__ void generate_moves_kernel(QuadBitBoard *positions, GameState *states
 
     if (index < nThreads)
     {
-        QuadBitBoard pos = positions[index];
+        QuadBitBoard pos = loadQuadBB(&positions[index]);
         GameState gs = states[index];
         int offset = (index == 0) ? 0 : inclPrefixSums[index - 1];
         CMove *genMoves = generatedMovesBase + offset;
@@ -333,7 +362,7 @@ __global__ void makeMove_and_perft_leaf_kernel(QuadBitBoard *positions, GameStat
         return;
 
     uint32 boardIndex = indices[index];
-    QuadBitBoard pos = positions[boardIndex];
+    QuadBitBoard pos = loadQuadBB(&positions[boardIndex]);
     GameState gs = states[boardIndex];
     int color = gs.chance;
 
