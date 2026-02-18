@@ -21,7 +21,7 @@
 #define  MIN_BLOCKS_PER_MP 3
 
 // preallocated memory size (for holding the perft tree in GPU memory)
-#define PREALLOCATED_MEMORY_SIZE (3072 * 1024 * 1024ull)
+#define PREALLOCATED_MEMORY_SIZE (16 * 1024 * 1024 * 1024ull)
 
 // 512 KB ought to be enough for holding the stack for the serial part of the gpu perft
 #define GPU_SERIAL_PERFT_STACK_SIZE (512 * 1024)

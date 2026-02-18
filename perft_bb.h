@@ -9,69 +9,67 @@
 void *preAllocatedBufferHost;
 
 // helper routines for CPU perft
-uint32 countMoves(HexaBitBoardPosition *pos)
+uint32 countMoves(QuadBitBoard *pos, GameState *gs)
 {
     uint32 nMoves;
-    int chance = pos->chance;
+    int chance = gs->chance;
 
 #if USE_TEMPLATE_CHANCE_OPT == 1
     if (chance == BLACK)
     {
-        nMoves = MoveGeneratorBitboard::countMoves<BLACK>(pos);
+        nMoves = MoveGeneratorBitboard::countMoves<BLACK>(pos, gs);
     }
     else
     {
-        nMoves = MoveGeneratorBitboard::countMoves<WHITE>(pos);
+        nMoves = MoveGeneratorBitboard::countMoves<WHITE>(pos, gs);
     }
 #else
-    nMoves = MoveGeneratorBitboard::countMoves(pos, chance);
+    nMoves = MoveGeneratorBitboard::countMoves(pos, gs, chance);
 #endif
     return nMoves;
 }
 
-uint32 generateBoards(HexaBitBoardPosition *pos, HexaBitBoardPosition *newPositions)
+__host__ __device__ __forceinline__ uint32 generateMoves(QuadBitBoard *pos, GameState *gs, uint8 color, CMove *genMoves)
 {
-    uint32 nMoves;
-    int chance = pos->chance;
 #if USE_TEMPLATE_CHANCE_OPT == 1
-    if (chance == BLACK)
+    if (color == BLACK)
     {
-        nMoves = MoveGeneratorBitboard::generateBoards<BLACK>(pos, newPositions);
+        return MoveGeneratorBitboard::generateMoves<BLACK>(pos, gs, genMoves);
     }
     else
     {
-        nMoves = MoveGeneratorBitboard::generateBoards<WHITE>(pos, newPositions);
+        return MoveGeneratorBitboard::generateMoves<WHITE>(pos, gs, genMoves);
     }
 #else
-    nMoves = MoveGeneratorBitboard::generateBoards(pos, newPositions, chance);
+    return MoveGeneratorBitboard::generateMoves(pos, gs, genMoves, color);
 #endif
-
-    return nMoves;
 }
-
-
 
 // A very simple CPU routine - only for estimating launch depth
-uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
+uint64 perft_bb(QuadBitBoard *pos, GameState *gs, uint32 depth)
 {
-    HexaBitBoardPosition newPositions[MAX_MOVES];
-
-    uint32 nMoves = 0;
-
     if (depth == 1)
     {
-        nMoves = countMoves(pos);
-        return nMoves;
+        return countMoves(pos, gs);
     }
 
-    nMoves = generateBoards(pos, newPositions);
+    CMove moves[MAX_MOVES];
+    int nMoves = generateMoves(pos, gs, gs->chance, moves);
 
     uint64 count = 0;
-
-    for (uint32 i=0; i < nMoves; i++)
+    for (int i = 0; i < nMoves; i++)
     {
-        uint64 childPerft = perft_bb(&newPositions[i], depth - 1);
-        count += childPerft;
+        QuadBitBoard childPos = *pos;
+        GameState childGs = *gs;
+#if USE_TEMPLATE_CHANCE_OPT == 1
+        if (gs->chance == WHITE)
+            MoveGeneratorBitboard::makeMove<WHITE>(&childPos, &childGs, moves[i]);
+        else
+            MoveGeneratorBitboard::makeMove<BLACK>(&childPos, &childGs, moves[i]);
+#else
+        MoveGeneratorBitboard::makeMove(&childPos, &childGs, moves[i], gs->chance);
+#endif
+        count += perft_bb(&childPos, &childGs, depth - 1);
     }
     return count;
 }
@@ -84,70 +82,38 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 #define MEM_ALIGNMENT 16
 
 // makes the given move on the given position
-__device__ __forceinline__ void makeMove(HexaBitBoardPosition *pos, CMove move, int chance)
+__device__ __forceinline__ void makeMove(QuadBitBoard *pos, GameState *gs, CMove move, int chance)
 {
 #if USE_TEMPLATE_CHANCE_OPT == 1
     if (chance == BLACK)
     {
-        MoveGeneratorBitboard::makeMove<BLACK>(pos, move);
+        MoveGeneratorBitboard::makeMove<BLACK>(pos, gs, move);
     }
     else
     {
-        MoveGeneratorBitboard::makeMove<WHITE>(pos, move);
+        MoveGeneratorBitboard::makeMove<WHITE>(pos, gs, move);
     }
 #else
-    MoveGeneratorBitboard::makeMove(pos, move, chance);
+    MoveGeneratorBitboard::makeMove(pos, gs, move, chance);
 #endif
 }
 
-__host__ __device__ __forceinline__ uint32 countMoves(HexaBitBoardPosition *pos, uint8 color)
+__host__ __device__ __forceinline__ uint32 countMoves(QuadBitBoard *pos, GameState *gs, uint8 color)
 {
 #if USE_TEMPLATE_CHANCE_OPT == 1
     if (color == BLACK)
     {
-        return MoveGeneratorBitboard::countMoves<BLACK>(pos);
+        return MoveGeneratorBitboard::countMoves<BLACK>(pos, gs);
     }
     else
     {
-        return MoveGeneratorBitboard::countMoves<WHITE>(pos);
+        return MoveGeneratorBitboard::countMoves<WHITE>(pos, gs);
     }
 #else
-    return MoveGeneratorBitboard::countMoves(pos, color);
+    return MoveGeneratorBitboard::countMoves(pos, gs, color);
 #endif
 }
 
-__host__ __device__ __forceinline__ uint32 generateBoards(HexaBitBoardPosition *pos, uint8 color, HexaBitBoardPosition *childBoards)
-{
-#if USE_TEMPLATE_CHANCE_OPT == 1
-    if (color == BLACK)
-    {
-        return MoveGeneratorBitboard::generateBoards<BLACK>(pos, childBoards);
-    }
-    else
-    {
-        return MoveGeneratorBitboard::generateBoards<WHITE>(pos, childBoards);
-    }
-#else
-    return MoveGeneratorBitboard::generateBoards(pos, childBoards, color);
-#endif
-}
-
-
-__host__ __device__ __forceinline__ uint32 generateMoves(HexaBitBoardPosition *pos, uint8 color, CMove *genMoves)
-{
-#if USE_TEMPLATE_CHANCE_OPT == 1
-    if (color == BLACK)
-    {
-        return MoveGeneratorBitboard::generateMoves<BLACK>(pos, genMoves);
-    }
-    else
-    {
-        return MoveGeneratorBitboard::generateMoves<WHITE>(pos, genMoves);
-    }
-#else
-    return MoveGeneratorBitboard::generateMoves(pos, genMoves, color);
-#endif
-}
 
 // fast reduction for the warp
 __device__ __forceinline__ void warpReduce(int &x)
@@ -310,8 +276,10 @@ struct GpuBumpAllocator
 #if LIMIT_REGISTER_USE == 1
 __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 #endif
-__global__ void makemove_and_count_moves_kernel(HexaBitBoardPosition *parentBoards, int *indices, CMove *moves,
-                                                 HexaBitBoardPosition *outPositions, int *moveCounts, int nThreads)
+__global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, GameState *parentStates,
+                                                 int *indices, CMove *moves,
+                                                 QuadBitBoard *outPositions, GameState *outStates,
+                                                 int *moveCounts, int nThreads)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -320,30 +288,34 @@ __global__ void makemove_and_count_moves_kernel(HexaBitBoardPosition *parentBoar
     if (index < nThreads)
     {
         int parentIndex = indices[index];
-        HexaBitBoardPosition pos = parentBoards[parentIndex];
+        QuadBitBoard pos = parentBoards[parentIndex];
+        GameState gs = parentStates[parentIndex];
         CMove move = moves[index];
 
-        uint8 color = pos.chance;
-        makeMove(&pos, move, color);
-        nMoves = countMoves(&pos, !color);
+        uint8 color = gs.chance;
+        makeMove(&pos, &gs, move, color);
+        nMoves = countMoves(&pos, &gs, !color);
 
         outPositions[index] = pos;
+        outStates[index] = gs;
         moveCounts[index] = nMoves;
     }
 }
 
 // Kernel: generate moves for each position (uses inclusive prefix sums for offsets)
-__global__ void generate_moves_kernel(HexaBitBoardPosition *positions, CMove *generatedMovesBase, int *inclPrefixSums, int nThreads)
+__global__ void generate_moves_kernel(QuadBitBoard *positions, GameState *states,
+                                       CMove *generatedMovesBase, int *inclPrefixSums, int nThreads)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (index < nThreads)
     {
-        HexaBitBoardPosition pos = positions[index];
+        QuadBitBoard pos = positions[index];
+        GameState gs = states[index];
         int offset = (index == 0) ? 0 : inclPrefixSums[index - 1];
         CMove *genMoves = generatedMovesBase + offset;
-        uint8 color = pos.chance;
-        generateMoves(&pos, color, genMoves);
+        uint8 color = gs.chance;
+        generateMoves(&pos, &gs, color, genMoves);
     }
 }
 
@@ -351,7 +323,9 @@ __global__ void generate_moves_kernel(HexaBitBoardPosition *positions, CMove *ge
 #if LIMIT_REGISTER_USE == 1
 __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 #endif
-__global__ void makeMove_and_perft_leaf_kernel(HexaBitBoardPosition *positions, int *indices, CMove *moves, uint64 *globalPerftCounter, int nThreads)
+__global__ void makeMove_and_perft_leaf_kernel(QuadBitBoard *positions, GameState *states,
+                                                int *indices, CMove *moves,
+                                                uint64 *globalPerftCounter, int nThreads)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -359,15 +333,16 @@ __global__ void makeMove_and_perft_leaf_kernel(HexaBitBoardPosition *positions, 
         return;
 
     uint32 boardIndex = indices[index];
-    HexaBitBoardPosition pos = positions[boardIndex];
-    int color = pos.chance;
+    QuadBitBoard pos = positions[boardIndex];
+    GameState gs = states[boardIndex];
+    int color = gs.chance;
 
     CMove move = moves[index];
 
-    makeMove(&pos, move, color);
+    makeMove(&pos, &gs, move, color);
 
     // count moves at this position
-    int nMoves = countMoves(&pos, !color);
+    int nMoves = countMoves(&pos, &gs, !color);
 
     // warp-wide reduction before atomic add
     warpReduce(nMoves);
@@ -381,15 +356,12 @@ __global__ void makeMove_and_perft_leaf_kernel(HexaBitBoardPosition *positions, 
 }
 
 // Kernel: interval expand using inclusive prefix sums (naive binary search)
-// For output index tid, finds parent i such that inclPrefixSums[i] > tid.
-// Adjacent threads search nearby values so the prefixSums array stays hot in L2 cache.
 __global__ void interval_expand_kernel(int *output, const int *inclPrefixSums, int numParents, int numOutput)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numOutput)
         return;
 
-    // Binary search: find smallest i such that inclPrefixSums[i] > tid
     int lo = 0, hi = numParents;
     while (lo < hi)
     {
@@ -408,29 +380,30 @@ __global__ void interval_expand_kernel(int *output, const int *inclPrefixSums, i
 // -------------------------------------------------------------------------
 
 // Run perft on GPU for a single position using host-driven breadth-first search
-// Returns the perft count
-uint64 perft_gpu_host_bfs(HexaBitBoardPosition *pos, int depth, void *gpuBuffer, size_t bufferSize)
+uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, int depth, void *gpuBuffer, size_t bufferSize)
 {
     if (depth <= 0)
         return 1;
     if (depth == 1)
-        return countMoves(pos);
+        return countMoves(pos, gs);
 
     GpuBumpAllocator alloc(gpuBuffer, bufferSize);
 
-    // Pre-allocate CUB temp storage once (query with large N, reuse every iteration)
+    // Pre-allocate CUB temp storage once
     void *d_cubTemp = nullptr;
     size_t cubTempBytes = 0;
     cub::DeviceScan::InclusiveSum(d_cubTemp, cubTempBytes, (int*)nullptr, (int*)nullptr, 256 * 1024 * 1024);
     d_cubTemp = alloc.alloc<uint8>(cubTempBytes);
 
-    // Copy root position to GPU
-    HexaBitBoardPosition *d_rootPos = alloc.alloc<HexaBitBoardPosition>(1);
-    cudaMemcpy(d_rootPos, pos, sizeof(HexaBitBoardPosition), cudaMemcpyHostToDevice);
+    // Copy root position to GPU (separate arrays)
+    QuadBitBoard *d_rootPos = alloc.alloc<QuadBitBoard>(1);
+    GameState *d_rootState = alloc.alloc<GameState>(1);
+    cudaMemcpy(d_rootPos, pos, sizeof(QuadBitBoard), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_rootState, gs, sizeof(GameState), cudaMemcpyHostToDevice);
 
     // Generate root moves on CPU
     CMove rootMoves[MAX_MOVES];
-    int rootMoveCount = generateMoves(pos, pos->chance, rootMoves);
+    int rootMoveCount = generateMoves(pos, gs, gs->chance, rootMoves);
 
     if (rootMoveCount == 0)
         return 0;
@@ -447,21 +420,23 @@ uint64 perft_gpu_host_bfs(HexaBitBoardPosition *pos, int depth, void *gpuBuffer,
     uint64 *d_perftCounter = alloc.alloc<uint64>(1);
     cudaMemset(d_perftCounter, 0, sizeof(uint64));
 
-    // Pre-allocate partition array for merge-path interval expand (from bump allocator)
-    const int maxPartitions = 100000;
+    // Pre-allocate partition array for merge-path interval expand
+    const int maxPartitions = 500000;
     int *d_partitions = alloc.alloc<int>(maxPartitions);
 
-    HexaBitBoardPosition *d_prevBoards = d_rootPos;
+    QuadBitBoard *d_prevBoards = d_rootPos;
+    GameState *d_prevStates = d_rootState;
     int currentCount = rootMoveCount;
 
     // BFS loop: depth-1 down to 2 are intermediate levels, level 1 is the leaf
     for (int level = depth - 1; level >= 2; level--)
     {
-        // Allocate boards and move counts (scan is done in-place, no separate prefix array)
-        HexaBitBoardPosition *d_curBoards = alloc.alloc<HexaBitBoardPosition>(currentCount);
+        // Allocate boards, states, and move counts
+        QuadBitBoard *d_curBoards = alloc.alloc<QuadBitBoard>(currentCount);
+        GameState *d_curStates = alloc.alloc<GameState>(currentCount);
         int *d_moveCounts = alloc.alloc<int>(currentCount);
 
-        if (!d_curBoards || !d_moveCounts)
+        if (!d_curBoards || !d_curStates || !d_moveCounts)
         {
             printf("\nOOM during BFS at level %d with %d positions\n", level, currentCount);
             return 0;
@@ -469,13 +444,15 @@ uint64 perft_gpu_host_bfs(HexaBitBoardPosition *pos, int depth, void *gpuBuffer,
 
         // Step 1: make moves and count child moves
         int nBlocks = (currentCount - 1) / BLOCK_SIZE + 1;
-        makemove_and_count_moves_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_indices, d_moves,
-                                                                   d_curBoards, d_moveCounts, currentCount);
+        makemove_and_count_moves_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                                   d_indices, d_moves,
+                                                                   d_curBoards, d_curStates,
+                                                                   d_moveCounts, currentCount);
 
-        // Step 2: in-place inclusive prefix sum (d_moveCounts becomes inclusive prefix sums)
+        // Step 2: in-place inclusive prefix sum
         cub::DeviceScan::InclusiveSum(d_cubTemp, cubTempBytes, d_moveCounts, d_moveCounts, currentCount);
 
-        // Step 3: read back total = last element of inclusive sum (single D2H, provides sync)
+        // Step 3: read back total
         int nextLevelCount = 0;
         cudaMemcpy(&nextLevelCount, d_moveCounts + currentCount - 1, sizeof(int), cudaMemcpyDeviceToHost);
 
@@ -510,11 +487,12 @@ uint64 perft_gpu_host_bfs(HexaBitBoardPosition *pos, int depth, void *gpuBuffer,
         mp_interval_expand_kernel<<<numExpandCTAs, BLOCK_SIZE>>>(d_newIndices, d_moveCounts,
                                                                    nextLevelCount, currentCount, d_partitions);
 
-        // Step 5: generate moves (using inclusive prefix sums for offsets)
-        generate_moves_kernel<<<nBlocks, BLOCK_SIZE>>>(d_curBoards, d_newMoves, d_moveCounts, currentCount);
+        // Step 5: generate moves
+        generate_moves_kernel<<<nBlocks, BLOCK_SIZE>>>(d_curBoards, d_curStates, d_newMoves, d_moveCounts, currentCount);
 
         // Advance to next level
         d_prevBoards = d_curBoards;
+        d_prevStates = d_curStates;
         d_indices = d_newIndices;
         d_moves = d_newMoves;
         currentCount = nextLevelCount;
@@ -523,7 +501,9 @@ uint64 perft_gpu_host_bfs(HexaBitBoardPosition *pos, int depth, void *gpuBuffer,
     // Final level: make move and count (leaf)
     {
         int nBlocks = (currentCount - 1) / BLOCK_SIZE + 1;
-        makeMove_and_perft_leaf_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_indices, d_moves, d_perftCounter, currentCount);
+        makeMove_and_perft_leaf_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                                  d_indices, d_moves,
+                                                                  d_perftCounter, currentCount);
         cudaDeviceSynchronize();
     }
 

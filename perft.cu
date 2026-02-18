@@ -47,10 +47,11 @@ int main(int argc, char *argv[])
     }
     Utils::dispBoard(&testBoard);
 
-    HexaBitBoardPosition testBB;
-    Utils::board088ToHexBB(&testBB, &testBoard);
+    QuadBitBoard testBB;
+    GameState testGS;
+    Utils::board088ToQuadBB(&testBB, &testGS, &testBoard);
 
-    uint32 launchDepth = estimateLaunchDepth(&testBB);
+    uint32 launchDepth = estimateLaunchDepth(&testBB, &testGS);
     launchDepth = min(launchDepth, (uint32)11);
 
     // for best performance without GPU hash
@@ -72,7 +73,7 @@ int main(int argc, char *argv[])
 
     for (int depth = 1; depth <= maxDepth; depth++)
     {
-        perftLauncher(&testBB, depth, launchDepth);
+        perftLauncher(&testBB, &testGS, depth, launchDepth);
         fflush(stdout);
     }
 

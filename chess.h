@@ -140,30 +140,28 @@ struct Move
 CT_ASSERT(sizeof(Move) == 4);
 
 
-// another bit-board based board representation using 6 bitboards
-struct HexaBitBoardPosition
+// Quad-bitboard representation: 4 bitboards encode piece type + color per square
+// bb[0] = color bit (1 for black pieces, 0 for white/empty)
+// bb[1] = piece bit 0 (set for PAWN, BISHOP, QUEEN)
+// bb[2] = piece bit 1 (set for KNIGHT, BISHOP, KING)
+// bb[3] = piece bit 2 (set for ROOK, QUEEN, KING)
+// Piece encoding: PAWN=001, KNIGHT=010, BISHOP=011, ROOK=100, QUEEN=101, KING=110
+struct QuadBitBoard
 {
-    // 48 bytes of bitboard data with interleaved game state data in pawn bitboards
-    uint64   whitePieces;
-    union
-    {
-        uint64   pawns;
-        struct
-        {
-            uint8 whiteCastle       : 2;
-            uint8 blackCastle       : 2;
-            uint8 enPassent         : 4;         // file + 1 (file is the file containing the enpassent-target pawn)
-            uint8 padding[6];
-            uint8 halfMoveCounter   : 7;         // to detect 50 move draw rule
-            uint8 chance            : 1;
-        };
-    };
-    uint64   knights;
-    uint64   bishopQueens;
-    uint64   rookQueens;
-    uint64   kings;
+    uint64 bb[4];
 };
-CT_ASSERT(sizeof(HexaBitBoardPosition) == 48);
+CT_ASSERT(sizeof(QuadBitBoard) == 32);
+
+// Game state stored separately for better coalescing
+struct GameState
+{
+    uint16 whiteCastle      : 2;
+    uint16 blackCastle      : 2;
+    uint16 enPassent        : 4;   // file + 1
+    uint16 halfMoveCounter  : 7;
+    uint16 chance           : 1;   // 0=WHITE, 1=BLACK
+};
+CT_ASSERT(sizeof(GameState) == 2);
 
 // a more compact move structure (16 bit)
 // from http://chessprogramming.wikispaces.com/Encoding+Moves

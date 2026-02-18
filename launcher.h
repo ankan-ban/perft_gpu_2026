@@ -26,12 +26,12 @@ void initGPU(int gpu)
     }
 }
 
-uint32 estimateLaunchDepth(HexaBitBoardPosition *pos)
+uint32 estimateLaunchDepth(QuadBitBoard *pos, GameState *gs)
 {
     // estimate branching factor near the root
-    double perft1 = (double)perft_bb(pos, 1);
-    double perft2 = (double)perft_bb(pos, 2);
-    double perft3 = (double)perft_bb(pos, 3);
+    double perft1 = (double)perft_bb(pos, gs, 1);
+    double perft2 = (double)perft_bb(pos, gs, 2);
+    double perft3 = (double)perft_bb(pos, gs, 3);
 
     // this works well when the root position has very low branching factor (e.g, in case king is in check)
     float geoMean = sqrt((perft3 / perft2) * (perft2 / perft1));
@@ -54,44 +54,46 @@ uint32 estimateLaunchDepth(HexaBitBoardPosition *pos)
 
 
 // Serial CPU recursion at top levels, launching GPU BFS at launchDepth
-uint64 perft_cpu_recurse(HexaBitBoardPosition *pos, int depth, int launchDepth, void *gpuBuffer, size_t bufferSize)
+uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, int depth, int launchDepth, void *gpuBuffer, size_t bufferSize)
 {
     if (depth <= launchDepth)
     {
-        return perft_gpu_host_bfs(pos, depth, gpuBuffer, bufferSize);
+        return perft_gpu_host_bfs(pos, gs, depth, gpuBuffer, bufferSize);
     }
 
     // Serial CPU recursion
     CMove moves[MAX_MOVES];
-    HexaBitBoardPosition childPos;
-    int nMoves = generateMoves(pos, pos->chance, moves);
+    QuadBitBoard childPos;
+    GameState childGs;
+    int nMoves = generateMoves(pos, gs, gs->chance, moves);
 
     uint64 count = 0;
     for (int i = 0; i < nMoves; i++)
     {
         childPos = *pos;
+        childGs = *gs;
 #if USE_TEMPLATE_CHANCE_OPT == 1
-        if (pos->chance == WHITE)
-            MoveGeneratorBitboard::makeMove<WHITE>(&childPos, moves[i]);
+        if (gs->chance == WHITE)
+            MoveGeneratorBitboard::makeMove<WHITE>(&childPos, &childGs, moves[i]);
         else
-            MoveGeneratorBitboard::makeMove<BLACK>(&childPos, moves[i]);
+            MoveGeneratorBitboard::makeMove<BLACK>(&childPos, &childGs, moves[i]);
 #else
-        MoveGeneratorBitboard::makeMove(&childPos, moves[i], pos->chance);
+        MoveGeneratorBitboard::makeMove(&childPos, &childGs, moves[i], gs->chance);
 #endif
 
-        uint64 childPerft = perft_cpu_recurse(&childPos, depth - 1, launchDepth, gpuBuffer, bufferSize);
+        uint64 childPerft = perft_cpu_recurse(&childPos, &childGs, depth - 1, launchDepth, gpuBuffer, bufferSize);
         count += childPerft;
     }
     return count;
 }
 
 
-void perftLauncher(HexaBitBoardPosition *pos, uint32 depth, int launchDepth)
+void perftLauncher(QuadBitBoard *pos, GameState *gs, uint32 depth, int launchDepth)
 {
     EventTimer timer;
     timer.start();
 
-    uint64 result = perft_cpu_recurse(pos, depth, launchDepth, preAllocatedBufferHost, PREALLOCATED_MEMORY_SIZE);
+    uint64 result = perft_cpu_recurse(pos, gs, depth, launchDepth, preAllocatedBufferHost, PREALLOCATED_MEMORY_SIZE);
 
     timer.stop();
 
