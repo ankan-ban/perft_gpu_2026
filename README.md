@@ -6,7 +6,7 @@ This is a heavily optimized rewrite of the [original perft_gpu](https://github.c
 
 ## Performance
 
-Measured on a single NVIDIA A100 GPU:
+Measured on a single NVIDIA RTX 4090 GPU:
 
 | Position | Depth | Nodes | Speed |
 |---|---|---|---|
@@ -37,7 +37,7 @@ This loop repeats until a configurable "launch depth", after which the remaining
 Requirements:
 - CUDA Toolkit (tested with CUDA 12.x)
 - CMake 3.18+
-- GPU with compute capability 8.0+ (e.g., A100, RTX 3090)
+- GPU with compute capability 8.0+ (e.g., RTX 3090, RTX 4090)
 
 ```bash
 cmake -B build
