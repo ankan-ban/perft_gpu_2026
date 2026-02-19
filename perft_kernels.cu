@@ -384,6 +384,45 @@ __global__ void makeMove_and_perft_leaf_kernel(QuadBitBoard *positions, GameStat
 
 
 // -------------------------------------------------------------------------
+// Fused 2-level leaf from boards: each thread takes a board directly
+// (no input move), generates all moves, and for each child makes the
+// move and counts grandchildren. Used as dynamic OOM fallback.
+// -------------------------------------------------------------------------
+__global__ void perft_2level_from_board_kernel(QuadBitBoard *boards, GameState *states,
+                                                uint64 *globalPerftCounter, int nThreads)
+{
+    uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (index >= nThreads)
+        return;
+
+    QuadBitBoard pos = loadQuadBB(&boards[index]);
+    GameState gs = states[index];
+    uint8 color = gs.chance;
+
+    CMove childMoves[MAX_MOVES];
+    int nChildMoves = generateMoves(&pos, &gs, color, childMoves);
+
+    int totalCount = 0;
+    for (int i = 0; i < nChildMoves; i++)
+    {
+        QuadBitBoard childPos = pos;
+        GameState childGs = gs;
+        makeMove(&childPos, &childGs, childMoves[i], color);
+        totalCount += countMoves(&childPos, &childGs, !color);
+    }
+
+    warpReduce(totalCount);
+
+    int laneId = threadIdx.x & 0x1f;
+
+    if (laneId == 0)
+    {
+        atomicAdd(globalPerftCounter, (uint64)totalCount);
+    }
+}
+
+// -------------------------------------------------------------------------
 // Fused 2-level leaf kernel: replaces the last BFS level + leaf kernel.
 // Each thread makes a move to get a child position, generates all legal
 // moves for that child, then for each grandchild makes the move and counts.
@@ -530,6 +569,18 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, int depth, void *gpu
 
         if (!d_newIndices || !d_newMoves)
         {
+            // Dynamic OOM fallback: use 2-level leaf from the boards we just created.
+            // This avoids allocating the huge move/index arrays for this level.
+            if (level >= 2)
+            {
+                int nBlk = (currentCount - 1) / BLOCK_SIZE + 1;
+                perft_2level_from_board_kernel<<<nBlk, BLOCK_SIZE>>>(d_curBoards, d_curStates,
+                                                                      d_perftCounter, currentCount);
+                cudaDeviceSynchronize();
+                uint64 result = 0;
+                cudaMemcpy(&result, d_perftCounter, sizeof(uint64), cudaMemcpyDeviceToHost);
+                return result;
+            }
             printf("\nOOM for next level with %d moves\n", nextLevelCount);
             return 0;
         }

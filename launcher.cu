@@ -50,7 +50,10 @@ uint32 estimateLaunchDepth(QuadBitBoard *pos, GameState *gs)
         return 5;
     }
 
-    float memLimit = PREALLOCATED_MEMORY_SIZE / 2;  // be conservative
+    // With the fused 2-level leaf kernel, the last BFS level's huge move/index
+    // arrays are eliminated. This effectively multiplies the memory budget by
+    // the branching factor, allowing a higher launch depth (fewer CPU calls).
+    float memLimit = (float)PREALLOCATED_MEMORY_SIZE / 2.0f * branchingFactor;
 
     // estimated depth is log of memLimit in base 'branchingFactor'
     uint32 depth = (uint32)(log(memLimit) / log(branchingFactor));
