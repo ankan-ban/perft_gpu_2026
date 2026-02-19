@@ -839,11 +839,12 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         // 2. knight attacks
         attacked |= knightAttacks(enemyKnights);
 
-        // 3. bishop attacks
-		attacked |= multiBishopAttacks(enemyBishops, emptySquares | myKing); // squares behind king are also under threat (in the sense that king can't go there)
+        // 3. bishop attacks — squares behind king are also under threat (king can't go there)
+        uint64 proWithKing = emptySquares | myKing;
+		attacked |= multiBishopAttacks(enemyBishops, proWithKing);
 
         // 4. rook attacks
-		attacked |= multiRookAttacks(enemyRooks, emptySquares | myKing); // squares behind king are also under threat
+		attacked |= multiRookAttacks(enemyRooks, proWithKing);
 
         // 5. King attacks
         attacked |= kingAttacks(enemyKing);
@@ -936,9 +937,9 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         attackers |= ((chance == WHITE) ? (northEastOne(king) | northWestOne(king)) :
                                           (southEastOne(king) | southWestOne(king)) ) & enemyPawns;
 
-        // knight attackers
+        // knight attackers — use LUT since king is a single piece (saves ~16 ALU ops vs bulk knightAttacks)
         uint64 enemyKnights = knights_ & enemyPieces;
-        attackers |= knightAttacks(king) & enemyKnights;
+        attackers |= sqKnightAttacks(kingIndex) & enemyKnights;
 
         // bishop attackers
         uint64 enemyBishops = bishopQueens_ & enemyPieces;
@@ -1453,9 +1454,9 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         attackers |= ((chance == WHITE) ? (northEastOne(king) | northWestOne(king)) :
                                           (southEastOne(king) | southWestOne(king)) ) & enemyPawns;
 
-        // knight attackers
+        // knight attackers — use LUT since king is a single piece (saves ~16 ALU ops vs bulk knightAttacks)
         uint64 enemyKnights = knights_ & enemyPieces;
-        attackers |= knightAttacks(king) & enemyKnights;
+        attackers |= sqKnightAttacks(kingIndex) & enemyKnights;
 
         // bishop attackers
         uint64 enemyBishops = bishopQueens_ & enemyPieces;
@@ -1618,10 +1619,11 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 
         uint64 myKing     = kings & myPieces;
         uint8  kingIndex  = bitScan(myKing);
+        uint64 emptySquares = ~allPieces;
 
         uint64 pinned     = findPinnedPieces(myKing, myPieces, enemyBishops, enemyRooks, allPieces, kingIndex);
 
-        uint64 threatened = findAttackedSquares(~allPieces, enemyBishops, enemyRooks, allPawns & enemyPieces,
+        uint64 threatened = findAttackedSquares(emptySquares, enemyBishops, enemyRooks, allPawns & enemyPieces,
                                                 knights & enemyPieces, kings & enemyPieces,
                                                 myKing, !chance);
 
@@ -1667,7 +1669,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
                 }
                 else
                 {
-                    uint64 propogator = (~allPieces) | enPassentCapturedPiece | pawn;
+                    uint64 propogator = emptySquares | enPassentCapturedPiece | pawn;
                     uint64 causesCheck = (eastAttacks(enemyRooks, propogator) | westAttacks(enemyRooks, propogator)) &
                                          myKing;
                     if (!causesCheck)
@@ -1696,14 +1698,14 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             uint64 line = sqsInLine(pawnIndex, kingIndex);
 
             // pawn push
-            uint64 dst = ((chance == WHITE) ? northOne(pawn) : southOne(pawn)) & line & (~allPieces);
-            if (dst) 
+            uint64 dst = ((chance == WHITE) ? northOne(pawn) : southOne(pawn)) & line & emptySquares;
+            if (dst)
             {
                 nMoves++;
 
                 // double push (only possible if single push was possible)
-                dst = ((chance == WHITE) ? northOne(dst & checkingRankDoublePush): 
-                                           southOne(dst & checkingRankDoublePush) ) & (~allPieces);
+                dst = ((chance == WHITE) ? northOne(dst & checkingRankDoublePush):
+                                           southOne(dst & checkingRankDoublePush) ) & emptySquares;
                 if (dst) 
                 {
                     nMoves++;
@@ -1730,14 +1732,14 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 
         // pawn push (accumulate all promotions to save POPCs)
         uint64 allPromotions = 0;
-        uint64 dsts = ((chance == WHITE) ? northOne(myPawns) : southOne(myPawns)) & (~allPieces);
+        uint64 dsts = ((chance == WHITE) ? northOne(myPawns) : southOne(myPawns)) & emptySquares;
         uint64 promos = dsts & (RANK1 | RANK8);
         allPromotions = promos;
         nMoves += popCount(dsts ^ promos);  // non-promotion pushes
 
         // double push (never promotions — rank 4/5 destinations)
         dsts = ((chance == WHITE) ? northOne(dsts & checkingRankDoublePush):
-                                    southOne(dsts & checkingRankDoublePush) ) & (~allPieces);
+                                    southOne(dsts & checkingRankDoublePush) ) & emptySquares;
         nMoves += popCount(dsts);
 
         // captures
@@ -1799,7 +1801,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         while (bishops)
         {
             uint64 bishop = getOne(bishops);
-            uint64 bishopMoves = bishopAttacks(bishop, ~allPieces) & ~myPieces;
+            uint64 bishopMoves = bishopAttacks(bishop, emptySquares) & ~myPieces;
             bishopMoves &= sqsInLine(bitScan(bishop), kingIndex);
 
             nMoves += popCount(bishopMoves);
@@ -1811,7 +1813,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         while (bishops)
         {
             uint64 bishop = getOne(bishops);
-            uint64 bishopMoves = bishopAttacks(bishop, ~allPieces) & ~myPieces;
+            uint64 bishopMoves = bishopAttacks(bishop, emptySquares) & ~myPieces;
 
             nMoves += popCount(bishopMoves);
             bishops ^= bishop;
@@ -1825,19 +1827,19 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         while (rooks)
         {
             uint64 rook = getOne(rooks);
-            uint64 rookMoves = rookAttacks(rook, ~allPieces) & ~myPieces;
+            uint64 rookMoves = rookAttacks(rook, emptySquares) & ~myPieces;
             rookMoves &= sqsInLine(bitScan(rook), kingIndex);    // pined sliding pieces can move only along the line
 
             nMoves += popCount(rookMoves);
             rooks ^= rook;
         }
-        
+
         // remaining rooks/queens
         rooks = myRooks & ~pinned;
         while (rooks)
         {
             uint64 rook = getOne(rooks);
-            uint64 rookMoves = rookAttacks(rook, ~allPieces) & ~myPieces;
+            uint64 rookMoves = rookAttacks(rook, emptySquares) & ~myPieces;
 
             nMoves += popCount(rookMoves);
             rooks ^= rook;
@@ -1855,7 +1857,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         // figure out the source piece from quad encoding
         // bb[1]=piece bit 0, bb[2]=piece bit 1, bb[3]=piece bit 2
         // PAWN=1(001), KNIGHT=2(010), BISHOP=3(011), ROOK=4(100), QUEEN=5(101), KING=6(110)
-        uint8 piece = 0;
+        uint32 piece = 0;
         if (pos->bb[1] & src) piece |= 1;
         if (pos->bb[2] & src) piece |= 2;
         if (pos->bb[3] & src) piece |= 4;
