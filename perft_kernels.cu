@@ -813,6 +813,20 @@ void MoveGeneratorBitboard::init()
         err = cudaMemcpyToSymbol(g_castleClear, castleClear, sizeof(castleClear));
         if (err != S_OK) printf("For copying castleClear, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
     }
+
+    // Build and copy EP target LUTs
+    {
+        uint64 epBlack[9] = {0}, epWhite[9] = {0};
+        for (int f = 1; f <= 8; f++)
+        {
+            epBlack[f] = BIT(f - 1) << (8 * 2);  // rank 3
+            epWhite[f] = BIT(f - 1) << (8 * 5);  // rank 6
+        }
+        err = cudaMemcpyToSymbol(g_epTargetBlack, epBlack, sizeof(epBlack));
+        if (err != S_OK) printf("For copying epTargetBlack, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
+        err = cudaMemcpyToSymbol(g_epTargetWhite, epWhite, sizeof(epWhite));
+        if (err != S_OK) printf("For copying epTargetWhite, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
+    }
 }
 
 void initMoveGen()

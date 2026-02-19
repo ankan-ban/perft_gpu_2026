@@ -181,7 +181,23 @@ __device__ static CombinedMagicEntry g_rook_combined[64];
 // Only 6 squares have non-zero entries: A1, E1, H1, A8, E8, H8.
 __device__ static uint8 g_castleClear[64];
 
+// EP target LUT: indexed by enPassent field (0-8), gives the target square bitboard
+__device__ static uint64 g_epTargetBlack[9];  // target on rank 3
+__device__ static uint64 g_epTargetWhite[9];  // target on rank 6
+
 #endif //#ifndef SKIP_CUDA_CODE
+
+// Compute EP target square bitboard from GameState enPassent field and color
+template<uint8 chance>
+CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 getEpTarget(uint8 epField)
+{
+#ifdef __CUDA_ARCH__
+    return __ldg(chance == BLACK ? &g_epTargetBlack[epField] : &g_epTargetWhite[epField]);
+#else
+    if (!epField) return 0;
+    return (chance == BLACK) ? (BIT(epField - 1) << (8 * 2)) : (BIT(epField - 1) << (8 * 5));
+#endif
+}
 
 CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqsInBetweenLUT(uint8 sq1, uint8 sq2)
 {
@@ -989,18 +1005,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             // checking rank for pawn double pushes
             uint64 checkingRankDoublePush = RANK3 << (chance * 24);           // rank 3 or rank 6
 
-            uint64 enPassentTarget = 0;
-            if (gs->enPassent)
-            {
-                if (chance == BLACK)
-                {
-                    enPassentTarget = BIT(gs->enPassent - 1) << (8 * 2);
-                }
-                else
-                {
-                    enPassentTarget = BIT(gs->enPassent - 1) << (8 * 5);
-                }
-            }
+            uint64 enPassentTarget = getEpTarget<chance>(gs->enPassent);
 
             // en-passent can only save the king if the piece captured is the attacker
             uint64 enPassentCapturedPiece = (chance == WHITE) ? southOne(enPassentTarget) : northOne(enPassentTarget);
@@ -1282,18 +1287,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         uint64 myPawns = allPawns & myPieces;
 
         // generate en-passent moves
-        uint64 enPassentTarget = 0;
-        if (gs->enPassent)
-        {
-            if (chance == BLACK)
-            {
-                enPassentTarget = BIT(gs->enPassent - 1) << (8 * 2);
-            }
-            else
-            {
-                enPassentTarget = BIT(gs->enPassent - 1) << (8 * 5);
-            }
-        }
+        uint64 enPassentTarget = getEpTarget<chance>(gs->enPassent);
 
         if (enPassentTarget)
         {
@@ -1500,18 +1494,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             // checking rank for pawn double pushes
             uint64 checkingRankDoublePush = RANK3 << (chance * 24);           // rank 3 or rank 6
 
-            uint64 enPassentTarget = 0;
-            if (gs->enPassent)
-            {
-                if (chance == BLACK)
-                {
-                    enPassentTarget = BIT(gs->enPassent - 1) << (8 * 2);
-                }
-                else
-                {
-                    enPassentTarget = BIT(gs->enPassent - 1) << (8 * 5);
-                }
-            }
+            uint64 enPassentTarget = getEpTarget<chance>(gs->enPassent);
 
             // en-passent can only save the king if the piece captured is the attacker
             uint64 enPassentCapturedPiece = (chance == WHITE) ? southOne(enPassentTarget) : northOne(enPassentTarget);
@@ -1644,18 +1627,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         uint64 myPawns = allPawns & myPieces;
 
         // 0. generate en-passent moves first
-        uint64 enPassentTarget = 0;
-        if (gs->enPassent)
-        {
-            if (chance == BLACK)
-            {
-                enPassentTarget = BIT(gs->enPassent - 1) << (8 * 2);
-            }
-            else
-            {
-                enPassentTarget = BIT(gs->enPassent - 1) << (8 * 5);
-            }
-        }
+        uint64 enPassentTarget = getEpTarget<chance>(gs->enPassent);
 
         if (enPassentTarget)
         {
