@@ -2214,20 +2214,10 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 
         if (move.getFlags() == CM_FLAG_DOUBLE_PAWN_PUSH)
         {
-            // only mark en-passent if there actually is a en-passent capture possible in next move
-            uint64 allPawns_    = pos->bb[1] & ~pos->bb[2] & ~pos->bb[3];
-            uint64 allPieces_   = pos->bb[1] | pos->bb[2] | pos->bb[3];
-            uint64 blackPieces_ = pos->bb[0];
-            uint64 whitePieces_ = allPieces_ & ~blackPieces_;
-            uint64 enemyPieces_ = (chance == WHITE) ? blackPieces_ : whitePieces_;
-            uint64 enemyPawns   = allPawns_ & enemyPieces_;
-
-            uint64 epSources = (eastOne(dst) | westOne(dst)) & enemyPawns;
-
-            if (epSources)
-            {
-                gs->enPassent = (move.getFrom() & 7) + 1;
-            }
+            // Always set the EP flag — countMoves will check if any EP source
+            // pawns actually exist. This avoids re-deriving piece bitboards
+            // (~25 SASS instructions) in makeMove's predicated double-push path.
+            gs->enPassent = (move.getFrom() & 7) + 1;
         }
     }
 
