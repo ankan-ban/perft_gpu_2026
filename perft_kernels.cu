@@ -429,6 +429,7 @@ __global__ void perft_2level_from_board_kernel(QuadBitBoard *boards, GameState *
 // Saves massive memory (no need for the huge move/index arrays of the last
 // BFS level) and improves cache locality (siblings processed together).
 // -------------------------------------------------------------------------
+__launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *states,
                                           int *indices, CMove *moves,
                                           uint64 *globalPerftCounter, int nThreads)
@@ -447,8 +448,9 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
     CMove move = moves[index];
     makeMove(&pos, &gs, move, color);
 
-    // Generate all legal moves at level N-1 into local memory
-    CMove childMoves[MAX_MOVES];
+    // Generate all legal moves at level N-1 into local memory.
+    // 218 moves covers the wrost case
+    CMove childMoves[218];
     uint8 childColor = gs.chance;  // after makeMove, chance is flipped
     int nChildMoves = generateMoves(&pos, &gs, childColor, childMoves);
 
