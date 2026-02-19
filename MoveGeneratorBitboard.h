@@ -2137,14 +2137,9 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         if (pos->bb[3] & src) piece |= 4;
 
         // promote the pawn (if this was promotion move)
-        if (move.getFlags() == CM_FLAG_KNIGHT_PROMOTION || move.getFlags() == CM_FLAG_KNIGHT_PROMO_CAP)
-            piece = KNIGHT;
-        else if (move.getFlags() == CM_FLAG_BISHOP_PROMOTION || move.getFlags() == CM_FLAG_BISHOP_PROMO_CAP)
-            piece = BISHOP;
-        else if (move.getFlags() == CM_FLAG_ROOK_PROMOTION || move.getFlags() == CM_FLAG_ROOK_PROMO_CAP)
-            piece = ROOK;
-        else if (move.getFlags() == CM_FLAG_QUEEN_PROMOTION || move.getFlags() == CM_FLAG_QUEEN_PROMO_CAP)
-            piece = QUEEN;
+        // Branchless: promotions have bit 3 set (flags >= 8), piece type in bits [1:0]+2
+        if (move.getFlags() & CM_FLAG_PROMOTION)
+            piece = (move.getFlags() & 3) + KNIGHT;
 
         // clear source and destination from all bitboards (4 ops instead of 10)
         uint64 clearMask = ~(src | dst);
