@@ -221,6 +221,10 @@ __device__ static uint64 g_fancy_magic_lookup_table[97264];
 __device__ static FancyMagicEntry g_bishop_magics_fancy[64];
 __device__ static FancyMagicEntry g_rook_magics_fancy[64];
 
+// combined magic entries (mask + magic in one struct for single cache-line access)
+__device__ static CombinedMagicEntry g_bishop_combined[64];
+__device__ static CombinedMagicEntry g_rook_combined[64];
+
 // byte lookup fancy magics
 __device__ static uint8  g_fancy_byte_magic_lookup_table[97264];
 __device__ static uint64 g_fancy_byte_BishopLookup[1428];
@@ -724,21 +728,33 @@ public:
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 bishopAttacks(uint64 bishop, uint64 pro)
     {
         uint8 square = bitScan(bishop);
-        uint64 occ = (~pro) & sqBishopAttacksMasked(square);
 
 #if USE_FANCY_MAGICS == 1
 #ifdef __CUDA_ARCH__
+#if USE_COMBINED_MAGIC_GPU == 1
+        // Combined load: mask + magic from single 32-byte struct
+        const CombinedMagicEntry *entry = &g_bishop_combined[square];
+        uint64 mask = __ldg(&entry->mask);
+        uint64 factor = __ldg(&entry->factor);
+        int position = __ldg(&entry->position);
+        uint64 occ = (~pro) & mask;
+        int index = (factor * occ) >> (64 - BISHOP_MAGIC_BITS);
+        return sq_fancy_magic_lookup_table(position + index);
+#else
+        uint64 occ = (~pro) & sqBishopAttacksMasked(square);
         FancyMagicEntry magicEntry = sq_bishop_magics_fancy(square);
         int index = (magicEntry.factor * occ) >> (64 - BISHOP_MAGIC_BITS);
 
 #if USE_BYTE_LOOKUP_FANCY == 1
         int index2 = sq_fancy_byte_magic_lookup_table(magicEntry.position + index) + magicEntry.offset;
         return sq_fancy_byte_BishopLookup(index2);
-#else // USE_BYTE_LOOKUP_FANCY == 1
+#else
         return sq_fancy_magic_lookup_table(magicEntry.position + index);
-#endif // USE_BYTE_LOOKUP_FANCY == 1
+#endif
+#endif // USE_COMBINED_MAGIC_GPU
 
 #else // #ifdef __CUDA_ARCH__
+        uint64 occ = (~pro) & sqBishopAttacksMasked(square);
         // this version is slightly faster for CPUs.. why ?
         uint64 magic  = bishop_magics_fancy[square].factor;
         uint64 index = (magic * occ) >> (64 - BISHOP_MAGIC_BITS);
@@ -761,10 +777,20 @@ public:
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 rookAttacks(uint64 rook, uint64 pro)
     {
         uint8 square = bitScan(rook);
-        uint64 occ = (~pro) & sqRookAttacksMasked(square);
 
 #if USE_FANCY_MAGICS == 1
 #ifdef __CUDA_ARCH__
+#if USE_COMBINED_MAGIC_GPU == 1
+        // Combined load: mask + magic from single 32-byte struct
+        const CombinedMagicEntry *entry = &g_rook_combined[square];
+        uint64 mask = __ldg(&entry->mask);
+        uint64 factor = __ldg(&entry->factor);
+        int position = __ldg(&entry->position);
+        uint64 occ = (~pro) & mask;
+        int index = (factor * occ) >> (64 - ROOK_MAGIC_BITS);
+        return sq_fancy_magic_lookup_table(position + index);
+#else
+        uint64 occ = (~pro) & sqRookAttacksMasked(square);
         FancyMagicEntry magicEntry = sq_rook_magics_fancy(square);
         int index = (magicEntry.factor * occ) >> (64 - ROOK_MAGIC_BITS);
 #if USE_BYTE_LOOKUP_FANCY == 1
@@ -773,8 +799,10 @@ public:
 #else
         return sq_fancy_magic_lookup_table(magicEntry.position + index);
 #endif
+#endif // USE_COMBINED_MAGIC_GPU
 
 #else
+        uint64 occ = (~pro) & sqRookAttacksMasked(square);
         // this version is slightly faster for CPUs.. why ?
         uint64 magic  = rook_magics_fancy[square].factor;
         uint64 index = (magic * occ) >> (64 - ROOK_MAGIC_BITS);

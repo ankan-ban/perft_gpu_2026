@@ -210,6 +210,18 @@ struct FancyMagicEntry
     };
 };
 
+// Combined magic entry: merges occupancy mask + magic entry for single cache-line access.
+// 32 bytes per entry = 1 cache sector. Reduces L1 traffic vs separate 8+16 byte loads.
+struct CombinedMagicEntry
+{
+    uint64  mask;       // occupancy mask (was sqBishopAttacksMasked / sqRookAttacksMasked)
+    uint64  factor;     // magic number
+    int     position;   // position in the main lookup table
+    int     _pad;       // padding to 32 bytes for aligned access
+    uint64  _pad2;
+};
+CT_ASSERT(sizeof(CombinedMagicEntry) == 32);
+
 // max no of moves possible for a given board position (this can be as large as 218 ?)
 // e.g, test this FEN string "3Q4/1Q4Q1/4Q3/2Q4R/Q4Q2/3Q4/1Q4Rp/1K1BBNNk w - - 0 1"
 #define MAX_MOVES 256

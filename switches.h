@@ -55,6 +55,11 @@
 // helps maxwell a lot (> +10%)
 #define USE_SLIDING_LUT 1
 
+// use combined magic entry struct on GPU (mask + magic in one 32-byte struct)
+// merges sqBishopAttacksMasked/sqRookAttacksMasked with FancyMagicEntry for
+// single cache-line access instead of two separate loads
+#define USE_COMBINED_MAGIC_GPU 1
+
 // use fancy fixed-shift version - ~ 800 KB lookup tables
 // (setting this to 0 enables plain magics - with 2.3 MB lookup table)
 // plain magics is a bit faster at least for perft (on core 2 duo)

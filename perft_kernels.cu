@@ -822,6 +822,29 @@ void MoveGeneratorBitboard::init()
     err = cudaMemcpyToSymbol(g_rook_magics_fancy, rook_magics_fancy, sizeof(rook_magics_fancy));
     if (err != S_OK) printf("For copying rook_magics_fancy, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
 
+    // Build and copy combined magic entries (mask + magic in one struct)
+    {
+        CombinedMagicEntry bishopCombined[64], rookCombined[64];
+        for (int sq = 0; sq < 64; sq++)
+        {
+            bishopCombined[sq].mask = BishopAttacksMasked[sq];
+            bishopCombined[sq].factor = bishop_magics_fancy[sq].factor;
+            bishopCombined[sq].position = bishop_magics_fancy[sq].position;
+            bishopCombined[sq]._pad = 0;
+            bishopCombined[sq]._pad2 = 0ull;
+
+            rookCombined[sq].mask = RookAttacksMasked[sq];
+            rookCombined[sq].factor = rook_magics_fancy[sq].factor;
+            rookCombined[sq].position = rook_magics_fancy[sq].position;
+            rookCombined[sq]._pad = 0;
+            rookCombined[sq]._pad2 = 0ull;
+        }
+        err = cudaMemcpyToSymbol(g_bishop_combined, bishopCombined, sizeof(bishopCombined));
+        if (err != S_OK) printf("For copying bishop_combined, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
+        err = cudaMemcpyToSymbol(g_rook_combined, rookCombined, sizeof(rookCombined));
+        if (err != S_OK) printf("For copying rook_combined, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
+    }
+
     err = cudaMemcpyToSymbol(g_fancy_byte_magic_lookup_table, fancy_byte_magic_lookup_table, sizeof(fancy_byte_magic_lookup_table));
     if (err != S_OK) printf("For copying fancy_byte_magic_lookup_table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
 
