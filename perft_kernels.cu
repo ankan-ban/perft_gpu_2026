@@ -14,7 +14,6 @@ static uint32 countMoves(QuadBitBoard *pos, GameState *gs)
     uint32 nMoves;
     int chance = gs->chance;
 
-#if USE_TEMPLATE_CHANCE_OPT == 1
     if (chance == BLACK)
     {
         nMoves = MoveGeneratorBitboard::countMoves<BLACK>(pos, gs);
@@ -23,9 +22,6 @@ static uint32 countMoves(QuadBitBoard *pos, GameState *gs)
     {
         nMoves = MoveGeneratorBitboard::countMoves<WHITE>(pos, gs);
     }
-#else
-    nMoves = MoveGeneratorBitboard::countMoves(pos, gs, chance);
-#endif
     return nMoves;
 }
 
@@ -64,7 +60,6 @@ __device__ __forceinline__ void storeQuadBB(QuadBitBoard *ptr, const QuadBitBoar
 // makes the given move on the given position
 __device__ __forceinline__ void makeMove(QuadBitBoard *pos, GameState *gs, CMove move, int chance)
 {
-#if USE_TEMPLATE_CHANCE_OPT == 1
     if (chance == BLACK)
     {
         MoveGeneratorBitboard::makeMove<BLACK>(pos, gs, move);
@@ -73,14 +68,10 @@ __device__ __forceinline__ void makeMove(QuadBitBoard *pos, GameState *gs, CMove
     {
         MoveGeneratorBitboard::makeMove<WHITE>(pos, gs, move);
     }
-#else
-    MoveGeneratorBitboard::makeMove(pos, gs, move, chance);
-#endif
 }
 
 __host__ __device__ __forceinline__ uint32 countMoves(QuadBitBoard *pos, GameState *gs, uint8 color)
 {
-#if USE_TEMPLATE_CHANCE_OPT == 1
     if (color == BLACK)
     {
         return MoveGeneratorBitboard::countMoves<BLACK>(pos, gs);
@@ -89,9 +80,6 @@ __host__ __device__ __forceinline__ uint32 countMoves(QuadBitBoard *pos, GameSta
     {
         return MoveGeneratorBitboard::countMoves<WHITE>(pos, gs);
     }
-#else
-    return MoveGeneratorBitboard::countMoves(pos, gs, color);
-#endif
 }
 
 
@@ -664,14 +652,10 @@ uint64 perft_bb(QuadBitBoard *pos, GameState *gs, uint32 depth)
     {
         QuadBitBoard childPos = *pos;
         GameState childGs = *gs;
-#if USE_TEMPLATE_CHANCE_OPT == 1
         if (gs->chance == WHITE)
             MoveGeneratorBitboard::makeMove<WHITE>(&childPos, &childGs, moves[i]);
         else
             MoveGeneratorBitboard::makeMove<BLACK>(&childPos, &childGs, moves[i]);
-#else
-        MoveGeneratorBitboard::makeMove(&childPos, &childGs, moves[i], gs->chance);
-#endif
         count += perft_bb(&childPos, &childGs, depth - 1);
     }
     return count;
@@ -717,7 +701,6 @@ void MoveGeneratorBitboard::init()
         }
 
     // initialize magic lookup tables
-#if USE_SLIDING_LUT == 1
     srand (time(NULL));
     for (int square = A1; square <= H8; square++)
     {
@@ -741,36 +724,19 @@ void MoveGeneratorBitboard::init()
 
         mask = sqBishopAttacks(square)  & (~thisSquare) & CENTRAL_SQUARES;
         BishopAttacksMasked[square] = mask;
-#if USE_FANCY_MAGICS != 1
-        rookMagics  [square] = findRookMagicForSquare  (square, rookMagicAttackTables  [square]);
-        bishopMagics[square] = findBishopMagicForSquare(square, bishopMagicAttackTables[square]);
-#endif
     }
 
     // initialize fancy magic lookup table
     memset(fancy_magic_lookup_table, 0, sizeof(fancy_magic_lookup_table));
-    int globalOffsetRook = 0;
-    int globalOffsetBishop = 0;
 
     for (int square = A1; square <= H8; square++)
     {
-        int uniqueBishopAttacks = 0, uniqueRookAttacks=0;
-
-        uint64 rookMagic = findRookMagicForSquare  (square, &fancy_magic_lookup_table[rook_magics_fancy[square].position], rook_magics_fancy[square].factor,
-                                                    &fancy_byte_RookLookup[globalOffsetRook], &fancy_byte_magic_lookup_table[rook_magics_fancy[square].position], &uniqueRookAttacks);
+        uint64 rookMagic = findRookMagicForSquare(square, &fancy_magic_lookup_table[rook_magics_fancy[square].position], rook_magics_fancy[square].factor);
         assert(rookMagic == rook_magics_fancy[square].factor);
 
-        uint64 bishopMagic = findBishopMagicForSquare  (square, &fancy_magic_lookup_table[bishop_magics_fancy[square].position], bishop_magics_fancy[square].factor,
-                                                       &fancy_byte_BishopLookup[globalOffsetBishop], &fancy_byte_magic_lookup_table[bishop_magics_fancy[square].position], &uniqueBishopAttacks);
+        uint64 bishopMagic = findBishopMagicForSquare(square, &fancy_magic_lookup_table[bishop_magics_fancy[square].position], bishop_magics_fancy[square].factor);
         assert(bishopMagic == bishop_magics_fancy[square].factor);
-
-        rook_magics_fancy  [square].offset = globalOffsetRook;
-        globalOffsetRook += uniqueRookAttacks;
-
-        bishop_magics_fancy[square].offset = globalOffsetBishop;
-        globalOffsetBishop += uniqueBishopAttacks;
     }
-#endif
 
     // copy all the lookup tables from CPU's memory to GPU memory
     cudaError_t err = cudaMemcpyToSymbol(gBetween, Between, sizeof(Between));
@@ -794,24 +760,12 @@ void MoveGeneratorBitboard::init()
     err = cudaMemcpyToSymbol(gKingAttacks, KingAttacks, sizeof(KingAttacks));
     if (err != S_OK) printf("For copying KingAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
 
-    // Copy magical tables
+    // Copy magic tables
     err = cudaMemcpyToSymbol(gRookAttacksMasked, RookAttacksMasked, sizeof(RookAttacksMasked));
     if (err != S_OK) printf("For copying RookAttacksMasked table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
 
     err = cudaMemcpyToSymbol(gBishopAttacksMasked, BishopAttacksMasked , sizeof(BishopAttacksMasked));
     if (err != S_OK) printf("For copying BishopAttacksMasked  table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(gRookMagics, rookMagics, sizeof(rookMagics));
-    if (err != S_OK) printf("For copying rookMagics  table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(gBishopMagics, bishopMagics, sizeof(bishopMagics));
-    if (err != S_OK) printf("For copying bishopMagics table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(gRookMagicAttackTables, rookMagicAttackTables, sizeof(rookMagicAttackTables));
-    if (err != S_OK) printf("For copying RookMagicAttackTables, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(gBishopMagicAttackTables, bishopMagicAttackTables, sizeof(bishopMagicAttackTables));
-    if (err != S_OK) printf("For copying bishopMagicAttackTables, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
 
     err = cudaMemcpyToSymbol(g_fancy_magic_lookup_table, fancy_magic_lookup_table, sizeof(fancy_magic_lookup_table));
     if (err != S_OK) printf("For copying fancy_magic_lookup_table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
@@ -844,51 +798,6 @@ void MoveGeneratorBitboard::init()
         err = cudaMemcpyToSymbol(g_rook_combined, rookCombined, sizeof(rookCombined));
         if (err != S_OK) printf("For copying rook_combined, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
     }
-
-    err = cudaMemcpyToSymbol(g_fancy_byte_magic_lookup_table, fancy_byte_magic_lookup_table, sizeof(fancy_byte_magic_lookup_table));
-    if (err != S_OK) printf("For copying fancy_byte_magic_lookup_table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(g_fancy_byte_BishopLookup, fancy_byte_BishopLookup, sizeof(fancy_byte_BishopLookup));
-    if (err != S_OK) printf("For copying fancy_byte_BishopLookup, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(g_fancy_byte_RookLookup, fancy_byte_RookLookup, sizeof(fancy_byte_RookLookup));
-    if (err != S_OK) printf("For copying fancy_byte_RookLookup, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-#if USE_CONSTANT_MEMORY_FOR_LUT == 1
-    printf("Copying tables to constant memory...\n");
-    err = cudaMemcpyToSymbol(cLine, Line, sizeof(Line));
-    if (err != S_OK) printf("For copying line table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(cRookAttacks, RookAttacks, sizeof(RookAttacks));
-    if (err != S_OK) printf("For copying RookAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(cBishopAttacks, BishopAttacks, sizeof(BishopAttacks));
-    if (err != S_OK) printf("For copying BishopAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(cKnightAttacks, KnightAttacks, sizeof(KnightAttacks));
-    if (err != S_OK) printf("For copying KnightAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(cKingAttacks, KingAttacks, sizeof(KingAttacks));
-    if (err != S_OK) printf("For copying KingAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(cRookAttacksMasked, RookAttacksMasked, sizeof(RookAttacksMasked));
-    if (err != S_OK) printf("For copying RookAttacksMasked table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(cBishopAttacksMasked, BishopAttacksMasked , sizeof(BishopAttacksMasked));
-    if (err != S_OK) printf("For copying BishopAttacksMasked  table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(cRookMagics, rookMagics, sizeof(rookMagics));
-    if (err != S_OK) printf("For copying rookMagics  table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(cBishopMagics, bishopMagics, sizeof(bishopMagics));
-    if (err != S_OK) printf("For copying bishopMagics table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(c_bishop_magics_fancy, bishop_magics_fancy, sizeof(bishop_magics_fancy));
-    if (err != S_OK) printf("For copying bishop_magics_fancy, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-    err = cudaMemcpyToSymbol(c_rook_magics_fancy, rook_magics_fancy, sizeof(rook_magics_fancy));
-    if (err != S_OK) printf("For copying rook_magics_fancy, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-#endif
 }
 
 void initMoveGen()

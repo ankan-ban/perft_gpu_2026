@@ -81,14 +81,10 @@ static uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, int depth, int
     {
         childPos = *pos;
         childGs = *gs;
-#if USE_TEMPLATE_CHANCE_OPT == 1
         if (gs->chance == WHITE)
             MoveGeneratorBitboard::makeMove<WHITE>(&childPos, &childGs, moves[i]);
         else
             MoveGeneratorBitboard::makeMove<BLACK>(&childPos, &childGs, moves[i]);
-#else
-        MoveGeneratorBitboard::makeMove(&childPos, &childGs, moves[i], gs->chance);
-#endif
 
         uint64 childPerft = perft_cpu_recurse(&childPos, &childGs, depth - 1, launchDepth, gpuBuffer, bufferSize);
         count += childPerft;

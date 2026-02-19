@@ -200,7 +200,7 @@ struct FancyMagicEntry
             uint64  factor;     // the magic factor
             int     position;   // position in the main lookup table (of 97264 entries)
 
-            int     offset;     // position in the byte lookup table (only used when byte lookup is enabled)
+            int     _unused;    // padding for alignment
         };
 #ifndef SKIP_CUDA_CODE
 #ifdef __CUDA_ARCH__

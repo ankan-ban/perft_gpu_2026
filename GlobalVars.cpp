@@ -14,20 +14,9 @@ uint64 KingAttacks    [64];
 uint64 KnightAttacks  [64];
 uint64 pawnAttacks[2] [64];
 
-// magic lookup tables
-// plain magics (Fancy magic lookup tables in FancyMagics.h)
-#define ROOK_MAGIC_BITS    12
-#define BISHOP_MAGIC_BITS  9
-
-uint64 rookMagics            [64];
-uint64 bishopMagics          [64];
-
 // same as RookAttacks and BishopAttacks, but corner bits masked off
 uint64 RookAttacksMasked   [64];
 uint64 BishopAttacksMasked [64];
-
-uint64 rookMagicAttackTables      [64][1 << ROOK_MAGIC_BITS  ];    // 2 MB
-uint64 bishopMagicAttackTables    [64][1 << BISHOP_MAGIC_BITS];    // 256 KB
 
 // Fixed shift fancy magics
 // taken from http://www.open-aurec.com/wbforum/viewtopic.php?f=4&t=51162
@@ -173,10 +162,3 @@ FancyMagicEntry rook_magics_fancy[64] =
 
 
 
-// byte lookup version of the above table
-// 'inspired from': http://chessprogramming.wikispaces.com/Magic+Bitboards#Implementations-Byte Lookup
-// smallest set of magic tables ( < 150 KB including everything)? 
-
-uint8  fancy_byte_magic_lookup_table[97264];  // 95 KB
-uint64 fancy_byte_RookLookup        [4900] ;  // 39 K
-uint64 fancy_byte_BishopLookup      [1428] ;  // 11 K

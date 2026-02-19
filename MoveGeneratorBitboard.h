@@ -68,30 +68,14 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint8 popCount(uint64 x)
 {
 #ifdef __CUDA_ARCH__
     return __popcll(x);
-#elif USE_POPCNT == 1
-#ifdef _WIN64
-    return _mm_popcnt_u64(x);
-#elif __linux__
-    return _mm_popcnt_u64(x);
+#elif defined(_WIN64)
+    return (uint8)_mm_popcnt_u64(x);
+#elif defined(__linux__)
+    return (uint8)_mm_popcnt_u64(x);
 #else
     uint32 lo = (uint32)  x;
     uint32 hi = (uint32) (x >> 32);
     return _mm_popcnt_u32(lo) + _mm_popcnt_u32(hi);
-#endif
-#else
-
-    // taken from chess prgramming wiki: http://chessprogramming.wikispaces.com/Population+Count
-    const uint64 k1 = C64(0x5555555555555555); /*  -1/3   */
-    const uint64 k2 = C64(0x3333333333333333); /*  -1/5   */
-    const uint64 k4 = C64(0x0f0f0f0f0f0f0f0f); /*  -1/17  */
-    const uint64 kf = C64(0x0101010101010101); /*  -1/255 */
-
-    x =  x       - ((x >> 1)  & k1); /* put count of each 2 bits into those 2 bits */
-    x = (x & k2) + ((x >> 2)  & k2); /* put count of each 4 bits into those 4 bits */
-    x = (x       +  (x >> 4)) & k4 ; /* put count of each 8 bits into those 8 bits */
-    x = (x * kf) >> 56;              /* returns 8 most significant bits of x + (x<<8) + (x<<16) + (x<<24) + ...  */
-
-    return (uint8) x;
 #endif
 }
 
@@ -110,10 +94,9 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint8 bitScan(uint64 x)
 #elif __linux__
     return __builtin_ffsll(x) - 1;
 #else
-#if USE_HW_BITSCAN == 1
     uint32 lo = (uint32)  x;
     uint32 hi = (uint32) (x >> 32);
-    unsigned long id; 
+    unsigned long id;
 
     if (lo)
         _BitScanForward(&id, lo);
@@ -123,22 +106,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint8 bitScan(uint64 x)
         id += 32;
     }
 
-    return (uint8) id; 
-#else
-    const int index64[64] = {
-        0,  1, 48,  2, 57, 49, 28,  3,
-       61, 58, 50, 42, 38, 29, 17,  4,
-       62, 55, 59, 36, 53, 51, 43, 22,
-       45, 39, 33, 30, 24, 18, 12,  5,
-       63, 47, 56, 27, 60, 41, 37, 16,
-       54, 35, 52, 21, 44, 32, 23, 11,
-       46, 26, 40, 15, 34, 20, 31, 10,
-       25, 14, 19,  9, 13,  8,  7,  6
-    };
-    const uint64 debruijn64 = C64(0x03f79d71b4cb0a89);
-    assert (x != 0);
-    return index64[((x & -x) * debruijn64) >> 58];         
-#endif
+    return (uint8) id;
 #endif
 }
 
@@ -159,28 +127,17 @@ extern uint64 KnightAttacks  [64];
 extern uint64 pawnAttacks[2] [64];
 
 // magic lookup tables
-// plain magics (Fancy magic lookup tables in FancyMagics.h)
 #define ROOK_MAGIC_BITS    12
 #define BISHOP_MAGIC_BITS  9
-
-extern uint64 rookMagics            [64];
-extern uint64 bishopMagics          [64];
 
 // same as RookAttacks and BishopAttacks, but corner bits masked off
 extern uint64 RookAttacksMasked   [64];
 extern uint64 BishopAttacksMasked [64];
 
-extern uint64 rookMagicAttackTables      [64][1 << ROOK_MAGIC_BITS  ];    // 2 MB
-extern uint64 bishopMagicAttackTables    [64][1 << BISHOP_MAGIC_BITS];    // 256 KB
-
-// fancy and byte-lookup fancy magic tables
+// fancy magic tables
 extern uint64 fancy_magic_lookup_table[97264];
 extern FancyMagicEntry bishop_magics_fancy[64];
 extern FancyMagicEntry rook_magics_fancy[64];
-extern uint8  fancy_byte_magic_lookup_table[97264];  // 95 KB
-extern uint64 fancy_byte_RookLookup        [4900] ;  // 39 K
-extern uint64 fancy_byte_BishopLookup      [1428] ;  // 11 K
-
 
 uint64 findRookMagicForSquare  (int square, uint64 magicAttackTable[], uint64 magic = 0, uint64 *uniqueAttackTable = NULL, uint8 *byteIndices = NULL, int *numUniqueAttacks = 0);
 uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[], uint64 magic = 0, uint64 *uniqueAttackTable = NULL, uint8 *byteIndices = NULL, int *numUniqueAttacks = 0);
@@ -210,12 +167,6 @@ __device__ static uint64 gpawnAttacks[2] [64];
 __device__ static uint64 gRookAttacksMasked   [64];
 __device__ static uint64 gBishopAttacksMasked [64];
 
-// plain magics
-__device__ static uint64 gRookMagics                [64];
-__device__ static uint64 gBishopMagics              [64];
-__device__ static uint64 gRookMagicAttackTables     [64][1 << ROOK_MAGIC_BITS  ];    // 2 MB
-__device__ static uint64 gBishopMagicAttackTables   [64][1 << BISHOP_MAGIC_BITS];    // 256 KB
-
 // fancy magics
 __device__ static uint64 g_fancy_magic_lookup_table[97264];
 __device__ static FancyMagicEntry g_bishop_magics_fancy[64];
@@ -224,40 +175,6 @@ __device__ static FancyMagicEntry g_rook_magics_fancy[64];
 // combined magic entries (mask + magic in one struct for single cache-line access)
 __device__ static CombinedMagicEntry g_bishop_combined[64];
 __device__ static CombinedMagicEntry g_rook_combined[64];
-
-// byte lookup fancy magics
-__device__ static uint8  g_fancy_byte_magic_lookup_table[97264];
-__device__ static uint64 g_fancy_byte_BishopLookup[1428];
-__device__ static uint64 g_fancy_byte_RookLookup[4900];
-
-#if USE_CONSTANT_MEMORY_FOR_LUT == 1
-// copies of the above structures in constant memory
-//__constant__ static uint64 cBetween[64][64];      // 32 KB
-__constant__ static uint64 cLine[64][64];           // 32 KB
-
-__constant__ static uint64 cRookAttacks    [64];    // 512 bytes
-__constant__ static uint64 cBishopAttacks  [64];    // 512 bytes
-__constant__ static uint64 cKingAttacks    [64];    // 512 bytes
-__constant__ static uint64 cKnightAttacks  [64];    // 512 bytes
-
-__constant__ static uint64 cRookAttacksMasked   [64]; // 512 bytes
-__constant__ static uint64 cBishopAttacksMasked [64]; // 512 bytes
-
-__constant__ static uint64 cRookMagics          [64]; // 512 bytes
-__constant__ static uint64 cBishopMagics        [64]; // 512 bytes
-
-__constant__ static FancyMagicEntry c_bishop_magics_fancy[64]; // 1 KB
-__constant__ static FancyMagicEntry c_rook_magics_fancy[64];   // 1 KB
-
-//__constant__ static uint64 c_fancy_byte_BishopLookup[1428];    // 11.5 KB
-//__constant__ static uint64 c_fancy_byte_RookLookup[4900];      // 39.2 KB
-#endif
-
-#if USE_CONSTANT_MEMORY_FOR_LUT == 1
-#define CUDA_FAST_READ(x) (c ## x)
-#else
-#define CUDA_FAST_READ(x) (__ldg(&g ## x))
-#endif
 
 #endif //#ifndef SKIP_CUDA_CODE
 
@@ -273,7 +190,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqsInBetweenLUT(uint8 sq1, uint8 sq
 CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqsInLineLUT(uint8 sq1, uint8 sq2)
 {
 #ifdef __CUDA_ARCH__
-    return CUDA_FAST_READ(Line[sq1][sq2]);
+    return __ldg(&gLine[sq1][sq2]);
 #else
     return Line[sq1][sq2];
 #endif
@@ -282,7 +199,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqsInLineLUT(uint8 sq1, uint8 sq2)
 CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqKnightAttacks(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
-    return CUDA_FAST_READ(KnightAttacks[sq]);
+    return __ldg(&gKnightAttacks[sq]);
 #else
     return KnightAttacks[sq];
 #endif
@@ -291,7 +208,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqKnightAttacks(uint8 sq)
 CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqKingAttacks(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
-    return CUDA_FAST_READ(KingAttacks[sq]);
+    return __ldg(&gKingAttacks[sq]);
 #else
     return KingAttacks[sq];
 #endif
@@ -300,7 +217,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqKingAttacks(uint8 sq)
 CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqRookAttacks(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
-    return CUDA_FAST_READ(RookAttacks[sq]);
+    return __ldg(&gRookAttacks[sq]);
 #else
     return RookAttacks[sq];
 #endif
@@ -309,7 +226,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqRookAttacks(uint8 sq)
 CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqBishopAttacks(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
-    return CUDA_FAST_READ(BishopAttacks[sq]);
+    return __ldg(&gBishopAttacks[sq]);
 #else
     return BishopAttacks[sq];
 #endif
@@ -318,7 +235,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqBishopAttacks(uint8 sq)
 CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqBishopAttacksMasked(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
-    return CUDA_FAST_READ(BishopAttacksMasked[sq]);
+    return __ldg(&gBishopAttacksMasked[sq]);
 #else
     return BishopAttacksMasked[sq];
 #endif
@@ -327,45 +244,9 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqBishopAttacksMasked(uint8 sq)
 CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqRookAttacksMasked(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
-    return CUDA_FAST_READ(RookAttacksMasked[sq]);
+    return __ldg(&gRookAttacksMasked[sq]);
 #else
     return RookAttacksMasked[sq];
-#endif
-}
-
-CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqRookMagics(uint8 sq)
-{
-#ifdef __CUDA_ARCH__
-    return CUDA_FAST_READ(RookMagics[sq]);
-#else
-    return rookMagics[sq];
-#endif
-}
-
-CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqBishopMagics(uint8 sq)
-{
-#ifdef __CUDA_ARCH__
-    return CUDA_FAST_READ(BishopMagics[sq]);
-#else
-    return bishopMagics[sq];
-#endif
-}
-
-CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqRookMagicAttackTables(uint8 sq, int index)
-{
-#ifdef __CUDA_ARCH__
-    return __ldg(&gRookMagicAttackTables[sq][index]);
-#else
-    return rookMagicAttackTables[sq][index];
-#endif
-}
-
-CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqBishopMagicAttackTables(uint8 sq, int index)
-{
-#ifdef __CUDA_ARCH__
-    return __ldg(&gBishopMagicAttackTables[sq][index]);
-#else
-    return bishopMagicAttackTables[sq][index];
 #endif
 }
 
@@ -381,16 +262,9 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sq_fancy_magic_lookup_table(int ind
 CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE FancyMagicEntry sq_bishop_magics_fancy(int sq)
 {
 #ifdef __CUDA_ARCH__
-#if USE_CONSTANT_MEMORY_FOR_LUT == 1
-    //return c_bishop_magics_fancy[sq];
-    FancyMagicEntry op;
-    op.data = (((uint4 *)c_bishop_magics_fancy)[sq]);
-    return op;
-#else
     FancyMagicEntry op;
     op.data = __ldg(&(((uint4 *)g_bishop_magics_fancy)[sq]));
     return op;
-#endif
 #else
     return bishop_magics_fancy[sq];
 #endif
@@ -399,45 +273,11 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE FancyMagicEntry sq_bishop_magics_fancy(int
 CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE FancyMagicEntry sq_rook_magics_fancy(int sq)
 {
 #ifdef __CUDA_ARCH__
-#if USE_CONSTANT_MEMORY_FOR_LUT == 1
-    //return c_rook_magics_fancy[sq];
-    FancyMagicEntry op;
-    op.data = (((uint4 *)c_rook_magics_fancy)[sq]);
-    return op;
-#else
     FancyMagicEntry op;
     op.data = __ldg(&(((uint4 *)g_rook_magics_fancy)[sq]));
     return op;
-#endif
 #else
     return rook_magics_fancy[sq];
-#endif
-}
-
-CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint8 sq_fancy_byte_magic_lookup_table(int index)
-{
-#ifdef __CUDA_ARCH__
-    return __ldg(&g_fancy_byte_magic_lookup_table[index]);
-#else
-    return fancy_byte_magic_lookup_table[index];
-#endif
-}
-
-CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sq_fancy_byte_BishopLookup(int index)
-{
-#ifdef __CUDA_ARCH__
-    return __ldg(&g_fancy_byte_BishopLookup[index]);
-#else
-    return fancy_byte_BishopLookup[index];
-#endif
-}
-
-CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sq_fancy_byte_RookLookup(int index)
-{
-#ifdef __CUDA_ARCH__
-    return __ldg(&g_fancy_byte_RookLookup[index]);
-#else
-    return fancy_byte_RookLookup[index];
 #endif
 }
 
@@ -724,12 +564,10 @@ public:
     }
 
 
-#if USE_SLIDING_LUT == 1
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 bishopAttacks(uint64 bishop, uint64 pro)
     {
         uint8 square = bitScan(bishop);
 
-#if USE_FANCY_MAGICS == 1
 #ifdef __CUDA_ARCH__
 #if USE_COMBINED_MAGIC_GPU == 1
         // Combined load: mask + magic from single 32-byte struct
@@ -744,41 +582,22 @@ public:
         uint64 occ = (~pro) & sqBishopAttacksMasked(square);
         FancyMagicEntry magicEntry = sq_bishop_magics_fancy(square);
         int index = (magicEntry.factor * occ) >> (64 - BISHOP_MAGIC_BITS);
-
-#if USE_BYTE_LOOKUP_FANCY == 1
-        int index2 = sq_fancy_byte_magic_lookup_table(magicEntry.position + index) + magicEntry.offset;
-        return sq_fancy_byte_BishopLookup(index2);
-#else
         return sq_fancy_magic_lookup_table(magicEntry.position + index);
-#endif
 #endif // USE_COMBINED_MAGIC_GPU
 
-#else // #ifdef __CUDA_ARCH__
+#else // CPU path
         uint64 occ = (~pro) & sqBishopAttacksMasked(square);
-        // this version is slightly faster for CPUs.. why ?
         uint64 magic  = bishop_magics_fancy[square].factor;
         uint64 index = (magic * occ) >> (64 - BISHOP_MAGIC_BITS);
-#if USE_BYTE_LOOKUP_FANCY == 1
-        uint8 *table = &fancy_byte_magic_lookup_table[bishop_magics_fancy[square].position];
-        int index2 = table[index] + bishop_magics_fancy[square].offset;
-        return fancy_byte_BishopLookup[index2];
-#else // USE_BYTE_LOOKUP_FANCY == 1
         uint64 *table = &fancy_magic_lookup_table[bishop_magics_fancy[square].position];
         return table[index];
-#endif // USE_BYTE_LOOKUP_FANCY == 1
-#endif // #ifdef __CUDA_ARCH__
-#else // USE_FANCY_MAGICS == 1
-        uint64 magic = sqBishopMagics(square);
-        uint64 index = (magic * occ) >> (64 - BISHOP_MAGIC_BITS);
-        return sqBishopMagicAttackTables(square, index);
-#endif // USE_FANCY_MAGICS == 1
+#endif
     }
 
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 rookAttacks(uint64 rook, uint64 pro)
     {
         uint8 square = bitScan(rook);
 
-#if USE_FANCY_MAGICS == 1
 #ifdef __CUDA_ARCH__
 #if USE_COMBINED_MAGIC_GPU == 1
         // Combined load: mask + magic from single 32-byte struct
@@ -793,32 +612,15 @@ public:
         uint64 occ = (~pro) & sqRookAttacksMasked(square);
         FancyMagicEntry magicEntry = sq_rook_magics_fancy(square);
         int index = (magicEntry.factor * occ) >> (64 - ROOK_MAGIC_BITS);
-#if USE_BYTE_LOOKUP_FANCY == 1
-        int index2 = sq_fancy_byte_magic_lookup_table(magicEntry.position + index) + magicEntry.offset;
-        return sq_fancy_byte_RookLookup(index2);
-#else
         return sq_fancy_magic_lookup_table(magicEntry.position + index);
-#endif
 #endif // USE_COMBINED_MAGIC_GPU
 
-#else
+#else // CPU path
         uint64 occ = (~pro) & sqRookAttacksMasked(square);
-        // this version is slightly faster for CPUs.. why ?
         uint64 magic  = rook_magics_fancy[square].factor;
         uint64 index = (magic * occ) >> (64 - ROOK_MAGIC_BITS);
-#if USE_BYTE_LOOKUP_FANCY == 1
-        uint8 *table = &fancy_byte_magic_lookup_table[rook_magics_fancy[square].position];
-        int index2 = table[index] + rook_magics_fancy[square].offset;
-        return fancy_byte_RookLookup[index2];
-#else
         uint64 *table = &fancy_magic_lookup_table[rook_magics_fancy[square].position];
         return table[index];
-#endif
-#endif
-#else
-        uint64 magic = sqRookMagics(square);
-        uint64 index = (magic * occ) >> (64 - ROOK_MAGIC_BITS);
-        return sqRookMagicAttackTables(square, index);
 #endif
     }
 
@@ -847,15 +649,6 @@ public:
 
         return attacks;
     }
-#else
-// kogge stone handles multiple attackers automatically
-
-#define bishopAttacks bishopAttacksKoggeStone
-#define rookAttacks   rookAttacksKoggeStone
-
-#define multiBishopAttacks bishopAttacksKoggeStone
-#define multiRookAttacks   rookAttacksKoggeStone
-#endif
 
 CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 knights)
 {
@@ -974,20 +767,12 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 sqsInBetween(uint8 sq1, uint8 sq2)
     {
-#if USE_IN_BETWEEN_LUT == 1
         return sqsInBetweenLUT(sq1, sq2);
-#else
-        return squaresInBetween(sq1, sq2);
-#endif
     }
 
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 sqsInLine(uint8 sq1, uint8 sq2)
     {
-#if USE_IN_BETWEEN_LUT == 1
         return sqsInLineLUT(sq1, sq2);
-#else
-        return squaresInLine(sq1, sq2);
-#endif
     }
 
     static void init();
@@ -1052,11 +837,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         }
 
         // 2. knight attacks
-#if USE_KNIGHT_LUT_FOR_ATTACK_MAP == 1
-        attacked |= multiKnightAttacks(enemyKnights);
-#else
         attacked |= knightAttacks(enemyKnights);
-#endif
 
         // 3. bishop attacks
 		attacked |= multiBishopAttacks(enemyBishops, emptySquares | myKing); // squares behind king are also under threat (in the sense that king can't go there)
@@ -1065,11 +846,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 		attacked |= multiRookAttacks(enemyRooks, emptySquares | myKing); // squares behind king are also under threat
 
         // 5. King attacks
-#if USE_KING_LUT_FOR_ATTACK_MAP == 1
-        attacked |= sqKingAttacks(bitScan(enemyKing));
-#else
         attacked |= kingAttacks(enemyKing);
-#endif
         
         // TODO: 
         // 1. figure out if we really need to mask off pieces on board
@@ -1081,7 +858,6 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static void updateCastleFlag(GameState *gs, uint64 dst, uint8 chance)
     {
-#if USE_BITWISE_MAGIC_FOR_CASTLE_FLAG_UPDATION == 1
         if (chance == WHITE)
         {
             gs->blackCastle &= ~( ((dst & BLACK_KING_SIDE_ROOK ) >> H8)      |
@@ -1092,22 +868,6 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             gs->whiteCastle &= ~( ((dst & WHITE_KING_SIDE_ROOK ) >> H1) |
                                    ((dst & WHITE_QUEEN_SIDE_ROOK) << 1)) ;
         }
-#else
-        if (chance == WHITE)
-        {
-            if (dst & BLACK_KING_SIDE_ROOK)
-                gs->blackCastle &= ~CASTLE_FLAG_KING_SIDE;
-            else if (dst & BLACK_QUEEN_SIDE_ROOK)
-                gs->blackCastle &= ~CASTLE_FLAG_QUEEN_SIDE;
-        }
-        else
-        {
-            if (dst & WHITE_KING_SIDE_ROOK)
-                gs->whiteCastle &= ~CASTLE_FLAG_KING_SIDE;
-            else if (dst & WHITE_QUEEN_SIDE_ROOK)
-                gs->whiteCastle &= ~CASTLE_FLAG_QUEEN_SIDE;
-        }
-#endif
     }
 
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static void addCompactMove(uint32 *nMoves, CMove **genMoves, uint8 from, uint8 to, uint8 flags)
@@ -1153,17 +913,11 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
     uint64 kings        = (pos)->bb[2] & (pos)->bb[3] & ~(pos)->bb[1];
 
 
-#if USE_TEMPLATE_CHANCE_OPT == 1
     template<uint8 chance>
-#endif
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint32 generateMovesOutOfCheck (QuadBitBoard *pos, GameState *gs, CMove *genMoves,
                                            uint64 allPawns, uint64 allPieces, uint64 myPieces,
                                            uint64 enemyPieces, uint64 pinned, uint64 threatened,
-                                           uint8 kingIndex
-#if USE_TEMPLATE_CHANCE_OPT != 1
-                                           , uint8 chance
-#endif
-                                           )
+                                           uint8 kingIndex)
     {
         // derive piece bitboards from quad
         uint64 knights_      = pos->bb[2] & ~pos->bb[1] & ~pos->bb[3];
@@ -1196,11 +950,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 
 
         // A. Try king moves to get the king out of check
-#if USE_KING_LUT == 1
         uint64 kingMoves = sqKingAttacks(kingIndex);
-#else
-        uint64 kingMoves = kingAttacks(king);
-#endif
 
         kingMoves &= ~(threatened | myPieces);  // king can't move to a square under threat or a square containing piece of same side
         while(kingMoves)
@@ -1216,13 +966,13 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         // B. try moves to kill/block attacking pieces
         if (isSingular(attackers))
         {
-            // Find the safe squares - i.e, if a dst square of a move is any of the safe squares, 
+            // Find the safe squares - i.e, if a dst square of a move is any of the safe squares,
             // it will take king out of check
 
             // for pawn and knight attack, the only option is to kill the attacking piece
             // for bishops rooks and queens, it's the line between the attacker and the king, including the attacker
             uint64 safeSquares = attackers | sqsInBetween(kingIndex, bitScan(attackers));
-            
+
             // pieces that are pinned don't have any hope of saving the king
             // TODO: Think more about it
             myPieces &= ~pinned;
@@ -1300,11 +1050,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             while (myKnights)
             {
                 uint64 knight = getOne(myKnights);
-#if USE_KNIGHT_LUT == 1
                 uint64 knightMoves = sqKnightAttacks(bitScan(knight)) & safeSquares;
-#else
-                uint64 knightMoves = knightAttacks(knight) & safeSquares;
-#endif
                 while (knightMoves)
                 {
                     uint64 dst = getOne(knightMoves);
@@ -1361,12 +1107,8 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
     // generates moves for the given board position
     // returns the no of moves generated
     // genMoves contains the generated moves
-#if USE_TEMPLATE_CHANCE_OPT == 1
     template <uint8 chance>
     CUDA_CALLABLE_MEMBER static uint32 generateMoves (QuadBitBoard *pos, GameState *gs, CMove *genMoves)
-#else
-    CUDA_CALLABLE_MEMBER static uint32 generateMoves (QuadBitBoard *pos, GameState *gs, CMove *genMoves, uint8 chance)
-#endif
     {
         uint32 nMoves = 0;
 
@@ -1390,22 +1132,13 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         // king is in check: call special generate function to generate only the moves that take king out of check
         if (threatened & myKing)
         {
-#if USE_TEMPLATE_CHANCE_OPT == 1
             return generateMovesOutOfCheck<chance>(pos, gs, genMoves, allPawns, allPieces, myPieces, enemyPieces,
                                                               pinned, threatened, kingIndex);
-#else
-            return generateMovesOutOfCheck (pos, gs, genMoves, allPawns, allPieces, myPieces, enemyPieces,
-                                            pinned, threatened, kingIndex, chance);
-#endif
         }
 
 
         // generate king moves
-#if USE_KING_LUT == 1
         uint64 kingMoves = sqKingAttacks(kingIndex);
-#else
-        uint64 kingMoves = kingAttacks(myKing);
-#endif
 
         uint8 captureFlag = 0;
         kingMoves &= ~(threatened | myPieces);  // king can't move to a square under threat or a square containing piece of same side
@@ -1426,11 +1159,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         while (myKnights)
         {
             uint64 knight = getOne(myKnights);
-#if USE_KNIGHT_LUT == 1
             uint64 knightMoves = sqKnightAttacks(bitScan(knight)) & ~myPieces;
-#else
-            uint64 knightMoves = knightAttacks(knight) & ~myPieces;
-#endif
             while (knightMoves)
             {
                 uint64 dst = getOne(knightMoves);
@@ -1701,17 +1430,11 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         return nMoves;
     }
 
-#if USE_TEMPLATE_CHANCE_OPT == 1
     template<uint8 chance>
-#endif
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint32 countMovesOutOfCheck (QuadBitBoard *pos, GameState *gs,
                                            uint64 allPawns, uint64 allPieces, uint64 myPieces,
                                            uint64 enemyPieces, uint64 pinned, uint64 threatened,
-                                           uint8 kingIndex
-#if USE_TEMPLATE_CHANCE_OPT != 1
-                                           , uint8 chance
-#endif
-                                           )
+                                           uint8 kingIndex)
     {
         // derive piece bitboards from quad
         uint64 knights_      = pos->bb[2] & ~pos->bb[1] & ~pos->bb[3];
@@ -1744,11 +1467,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 
 
         // A. Try king moves to get the king out of check
-#if USE_KING_LUT == 1
         uint64 kingMoves = sqKingAttacks(kingIndex);
-#else
-        uint64 kingMoves = kingAttacks(king);
-#endif
 
         kingMoves &= ~(threatened | myPieces);  // king can't move to a square under threat or a square containing piece of same side
         nMoves += popCount(kingMoves);
@@ -1756,13 +1475,13 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         // B. try moves to kill/block attacking pieces
         if (isSingular(attackers))
         {
-            // Find the safe squares - i.e, if a dst square of a move is any of the safe squares, 
+            // Find the safe squares - i.e, if a dst square of a move is any of the safe squares,
             // it will take king out of check
 
             // for pawn and knight attack, the only option is to kill the attacking piece
             // for bishops rooks and queens, it's the line between the attacker and the king, including the attacker
             uint64 safeSquares = attackers | sqsInBetween(kingIndex, bitScan(attackers));
-            
+
             // pieces that are pinned don't have any hope of saving the king
             // TODO: Think more about it
             myPieces &= ~pinned;
@@ -1844,11 +1563,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             while (myKnights)
             {
                 uint64 knight = getOne(myKnights);
-#if USE_KNIGHT_LUT == 1
                 uint64 knightMoves = sqKnightAttacks(bitScan(knight)) & safeSquares;
-#else
-                uint64 knightMoves = knightAttacks(knight) & safeSquares;
-#endif
                 nMoves += popCount(knightMoves);
                 myKnights ^= knight;
             }
@@ -1888,12 +1603,8 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 
     // count moves for the given board position
     // returns the no of moves generated
-#if USE_TEMPLATE_CHANCE_OPT == 1
     template <uint8 chance>
     CUDA_CALLABLE_MEMBER static uint32 countMoves (QuadBitBoard *pos, GameState *gs)
-#else
-    CUDA_CALLABLE_MEMBER static uint32 countMoves (QuadBitBoard *pos, GameState *gs, uint8 chance)
-#endif
     {
         uint32 nMoves = 0;
 
@@ -1917,13 +1628,8 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         // king is in check
         if (threatened & myKing)
         {
-#if USE_TEMPLATE_CHANCE_OPT == 1
             return countMovesOutOfCheck<chance>(pos, gs, allPawns, allPieces, myPieces, enemyPieces,
                                                               pinned, threatened, kingIndex);
-#else
-            return countMovesOutOfCheck (pos, gs, allPawns, allPieces, myPieces, enemyPieces,
-                                         pinned, threatened, kingIndex, chance);
-#endif
         }
 
         uint64 myPawns = allPawns & myPieces;
@@ -2066,11 +1772,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         }
 
         // generate king moves
-#if USE_KING_LUT == 1
         uint64 kingMoves = sqKingAttacks(kingIndex);
-#else
-        uint64 kingMoves = kingAttacks(myKing);
-#endif
 
         kingMoves &= ~(threatened | myPieces);
         nMoves += popCount(kingMoves);
@@ -2080,11 +1782,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         while (myKnights)
         {
             uint64 knight = getOne(myKnights);
-#if USE_KNIGHT_LUT == 1
             uint64 knightMoves = sqKnightAttacks(bitScan(knight)) & ~myPieces;
-#else
-            uint64 knightMoves = knightAttacks(knight) & ~myPieces;
-#endif
             nMoves += popCount(knightMoves);
             myKnights ^= knight;
         }
@@ -2145,12 +1843,8 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         return nMoves;
     }
 
-#if USE_TEMPLATE_CHANCE_OPT == 1
     template<uint8 chance>
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static void makeMove (QuadBitBoard *pos, GameState *gs, CMove move)
-#else
-    CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static void makeMove(QuadBitBoard *pos, GameState *gs, CMove move, uint8 chance)
-#endif
     {
         uint64 src = BIT(move.getFrom());
         uint64 dst = BIT(move.getTo());
@@ -2254,7 +1948,6 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 // Free function wrapper for generateMoves (dispatches on template chance)
 CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint32 generateMoves(QuadBitBoard *pos, GameState *gs, uint8 color, CMove *genMoves)
 {
-#if USE_TEMPLATE_CHANCE_OPT == 1
     if (color == BLACK)
     {
         return MoveGeneratorBitboard::generateMoves<BLACK>(pos, gs, genMoves);
@@ -2263,9 +1956,6 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint32 generateMoves(QuadBitBoard *pos, Ga
     {
         return MoveGeneratorBitboard::generateMoves<WHITE>(pos, gs, genMoves);
     }
-#else
-    return MoveGeneratorBitboard::generateMoves(pos, gs, genMoves, color);
-#endif
 }
 
 

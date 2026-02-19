@@ -17,59 +17,10 @@
 // preallocated memory size (for holding the perft tree in GPU memory)
 #define PREALLOCATED_MEMORY_SIZE (16 * 1024 * 1024 * 1024ull)
 
-// use constant memory for accessing lookup tables (except for magic tables as they are huge)
-// the default is to use texture cache via __ldg instruction
-// improves performance on Maxwell a LOT, but hurts on newer hardware
-#define USE_CONSTANT_MEMORY_FOR_LUT 0
-
-// move generation functions templated on chance
-// +9% benefit on GM204
-#define USE_TEMPLATE_CHANCE_OPT 1
-
-// bitwise magic instead of if/else for castle flag updation
-// turning this off helps Maxwell a little
-#define USE_BITWISE_MAGIC_FOR_CASTLE_FLAG_UPDATION 1
-
-// intel core 2 doesn't have popcnt instruction
-#define USE_POPCNT 0
-
-// pentium 4 doesn't have fast HW bitscan
-#define USE_HW_BITSCAN 1
-
-// use lookup tables for figuring out squares in line and squares in between
-#define USE_IN_BETWEEN_LUT 1
-
-// use lookup table for king moves
-#define USE_KING_LUT 1
-
-// use lookup table for knight moves
-#define USE_KNIGHT_LUT 1
-
-// use per-piece LUT for bulk attack map in findAttackedSquares
-// trades heavy ALU ops for LSU lookups — doesn't help on RTX 4090 (ALU latency < LUT latency)
-#define USE_KING_LUT_FOR_ATTACK_MAP 0
-#define USE_KNIGHT_LUT_FOR_ATTACK_MAP 0
-
-// use lookup table (magics) for sliding moves
-// reduces performance by ~7% for GPU version
-// helps maxwell a lot (> +10%)
-#define USE_SLIDING_LUT 1
-
 // use combined magic entry struct on GPU (mask + magic in one 32-byte struct)
 // merges sqBishopAttacksMasked/sqRookAttacksMasked with FancyMagicEntry for
 // single cache-line access instead of two separate loads
 #define USE_COMBINED_MAGIC_GPU 1
-
-// use fancy fixed-shift version - ~ 800 KB lookup tables
-// (setting this to 0 enables plain magics - with 2.3 MB lookup table)
-// plain magics is a bit faster at least for perft (on core 2 duo)
-// fancy magics is clearly faster on more recent processors (ivy bridge)
-#define USE_FANCY_MAGICS 1
-
-// use byte lookup for fancy magics (~150 KB lookup tables)
-// around 3% slower than fixed shift fancy magics on CPU
-// and > 10% slower on GPU!
-#define USE_BYTE_LOOKUP_FANCY 0
 
 
 #ifdef __CUDACC__
