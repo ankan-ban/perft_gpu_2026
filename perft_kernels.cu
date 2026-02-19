@@ -292,8 +292,7 @@ __global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, Game
 __global__ void generate_moves_kernel(QuadBitBoard *positions, GameState *states,
                                        CMove *generatedMovesBase, int *inclPrefixSums, int nThreads)
 {
-    __shared__ uint16 smemMovesRaw[SMEM_MOVES_CAPACITY];
-    CMove *smemMoves = (CMove *)smemMovesRaw;
+    __shared__ CMove smemMoves[SMEM_MOVES_CAPACITY];
 
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.x;
