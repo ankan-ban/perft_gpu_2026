@@ -798,6 +798,21 @@ void MoveGeneratorBitboard::init()
         err = cudaMemcpyToSymbol(g_rook_combined, rookCombined, sizeof(rookCombined));
         if (err != S_OK) printf("For copying rook_combined, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
     }
+
+    // Build and copy castle clear LUT
+    // Bits [1:0] = whiteCastle bits to clear, bits [3:2] = blackCastle bits to clear
+    {
+        uint8 castleClear[64];
+        memset(castleClear, 0, sizeof(castleClear));
+        castleClear[H1] = CASTLE_FLAG_KING_SIDE;         // bit 0: white king-side
+        castleClear[A1] = CASTLE_FLAG_QUEEN_SIDE;        // bit 1: white queen-side
+        castleClear[E1] = CASTLE_FLAG_KING_SIDE | CASTLE_FLAG_QUEEN_SIDE;  // bits [1:0]: both white
+        castleClear[H8] = CASTLE_FLAG_KING_SIDE  << 2;   // bit 2: black king-side
+        castleClear[A8] = CASTLE_FLAG_QUEEN_SIDE << 2;   // bit 3: black queen-side
+        castleClear[E8] = (CASTLE_FLAG_KING_SIDE | CASTLE_FLAG_QUEEN_SIDE) << 2;  // bits [3:2]: both black
+        err = cudaMemcpyToSymbol(g_castleClear, castleClear, sizeof(castleClear));
+        if (err != S_OK) printf("For copying castleClear, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
+    }
 }
 
 void initMoveGen()

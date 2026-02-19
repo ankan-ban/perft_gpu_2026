@@ -176,6 +176,11 @@ __device__ static FancyMagicEntry g_rook_magics_fancy[64];
 __device__ static CombinedMagicEntry g_bishop_combined[64];
 __device__ static CombinedMagicEntry g_rook_combined[64];
 
+// Castle clear LUT: for each square, which castle bits to clear when a piece moves from/to it.
+// Bits [1:0] = whiteCastle bits to clear, bits [3:2] = blackCastle bits to clear.
+// Only 6 squares have non-zero entries: A1, E1, H1, A8, E8, H8.
+__device__ static uint8 g_castleClear[64];
+
 #endif //#ifndef SKIP_CUDA_CODE
 
 CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint64 sqsInBetweenLUT(uint8 sq1, uint8 sq2)
@@ -1880,15 +1885,6 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         if (piece & 2) pos->bb[2] |= dst;
         if (piece & 4) pos->bb[3] |= dst;
 
-        // king move: clear own castle flags
-        if (piece == KING)
-        {
-            if (chance == WHITE)
-                gs->whiteCastle = 0;
-            else
-                gs->blackCastle = 0;
-        }
-
         // en-passent capture: clear the captured pawn
         if (move.getFlags() == CM_FLAG_EP_CAPTURE)
         {
@@ -1932,12 +1928,30 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         // update game state
         gs->chance = !chance;
         gs->enPassent = 0;
-        updateCastleFlag(gs, dst, chance);
 
+#ifdef __CUDA_ARCH__
+        // Castle flag update via LUT: handles king moves, rook moves, and captures on rook squares
+        // in a single branchless sequence (2 loads + 1 OR + 2 AND-NOT into bitfields)
+        {
+            uint8 castleClear = __ldg(&g_castleClear[move.getFrom()]) | __ldg(&g_castleClear[move.getTo()]);
+            gs->whiteCastle &= ~castleClear;
+            gs->blackCastle &= ~(castleClear >> 2);
+        }
+#else
+        // CPU path: original logic
+        updateCastleFlag(gs, dst, chance);
+        if (piece == KING)
+        {
+            if (chance == WHITE)
+                gs->whiteCastle = 0;
+            else
+                gs->blackCastle = 0;
+        }
         if (piece == ROOK)
         {
             updateCastleFlag(gs, src, !chance);
         }
+#endif
 
         if (move.getFlags() == CM_FLAG_DOUBLE_PAWN_PUSH)
         {
