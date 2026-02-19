@@ -1728,28 +1728,31 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 
         myPawns = myPawns & ~pinned;
 
-        // pawn push
+        // pawn push (accumulate all promotions to save POPCs)
+        uint64 allPromotions = 0;
         uint64 dsts = ((chance == WHITE) ? northOne(myPawns) : southOne(myPawns)) & (~allPieces);
-        nMoves += popCount(dsts);
-        uint64 promotions = dsts & (RANK1 | RANK8);
-        nMoves += 3 * popCount(promotions);
+        uint64 promos = dsts & (RANK1 | RANK8);
+        allPromotions = promos;
+        nMoves += popCount(dsts ^ promos);  // non-promotion pushes
 
-        // double push
-        dsts = ((chance == WHITE) ? northOne(dsts & checkingRankDoublePush): 
+        // double push (never promotions — rank 4/5 destinations)
+        dsts = ((chance == WHITE) ? northOne(dsts & checkingRankDoublePush):
                                     southOne(dsts & checkingRankDoublePush) ) & (~allPieces);
         nMoves += popCount(dsts);
 
         // captures
         dsts = ((chance == WHITE) ? northWestOne(myPawns) : southWestOne(myPawns)) & enemyPieces;
-        nMoves += popCount(dsts);
-        promotions = dsts & (RANK1 | RANK8);
-        nMoves += 3 * popCount(promotions);
-
+        promos = dsts & (RANK1 | RANK8);
+        allPromotions |= promos;
+        nMoves += popCount(dsts ^ promos);  // non-promotion captures
 
         dsts = ((chance == WHITE) ? northEastOne(myPawns) : southEastOne(myPawns)) & enemyPieces;
-        nMoves += popCount(dsts);
-        promotions = dsts & (RANK1 | RANK8);
-        nMoves += 3 * popCount(promotions);
+        promos = dsts & (RANK1 | RANK8);
+        allPromotions |= promos;
+        nMoves += popCount(dsts ^ promos);  // non-promotion captures
+
+        // all promotions: 4 moves each (N/B/R/Q)
+        nMoves += 4 * popCount(allPromotions);
 
         // generate castling moves
         if (chance == WHITE)
