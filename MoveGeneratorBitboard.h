@@ -939,14 +939,9 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint32 generateMovesOutOfCheck (QuadBitBoard *pos, GameState *gs, CMove *genMoves,
                                            uint64 allPawns, uint64 allPieces, uint64 myPieces,
                                            uint64 enemyPieces, uint64 pinned, uint64 threatened,
-                                           uint8 kingIndex)
+                                           uint8 kingIndex,
+                                           uint64 knights_, uint64 bishopQueens_, uint64 rookQueens_, uint64 kings_)
     {
-        // derive piece bitboards from quad
-        uint64 knights_      = pos->bb[2] & ~pos->bb[1] & ~pos->bb[3];
-        uint64 bishopQueens_ = pos->bb[1] & (pos->bb[2] ^ pos->bb[3]);
-        uint64 rookQueens_   = pos->bb[3] & ~pos->bb[2];
-        uint64 kings_        = pos->bb[2] & pos->bb[3] & ~pos->bb[1];
-
         uint32 nMoves = 0;
         uint64 king = kings_ & myPieces;
 
@@ -1144,7 +1139,8 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         if (threatened & myKing)
         {
             return generateMovesOutOfCheck<chance>(pos, gs, genMoves, allPawns, allPieces, myPieces, enemyPieces,
-                                                              pinned, threatened, kingIndex);
+                                                              pinned, threatened, kingIndex,
+                                                              knights, bishopQueens, rookQueens, kings);
         }
 
 
@@ -1436,14 +1432,9 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint32 countMovesOutOfCheck (QuadBitBoard *pos, GameState *gs,
                                            uint64 allPawns, uint64 allPieces, uint64 myPieces,
                                            uint64 enemyPieces, uint64 pinned, uint64 threatened,
-                                           uint8 kingIndex)
+                                           uint8 kingIndex,
+                                           uint64 knights_, uint64 bishopQueens_, uint64 rookQueens_, uint64 kings_)
     {
-        // derive piece bitboards from quad
-        uint64 knights_      = pos->bb[2] & ~pos->bb[1] & ~pos->bb[3];
-        uint64 bishopQueens_ = pos->bb[1] & (pos->bb[2] ^ pos->bb[3]);
-        uint64 rookQueens_   = pos->bb[3] & ~pos->bb[2];
-        uint64 kings_        = pos->bb[2] & pos->bb[3] & ~pos->bb[1];
-
         uint32 nMoves = 0;
         uint64 king = kings_ & myPieces;
 
@@ -1621,7 +1612,8 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         if (threatened & myKing)
         {
             return countMovesOutOfCheck<chance>(pos, gs, allPawns, allPieces, myPieces, enemyPieces,
-                                                              pinned, threatened, kingIndex);
+                                                              pinned, threatened, kingIndex,
+                                                              knights, bishopQueens, rookQueens, kings);
         }
 
         uint64 myPawns = allPawns & myPieces;
