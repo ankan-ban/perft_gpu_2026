@@ -384,6 +384,58 @@ __global__ void makeMove_and_perft_leaf_kernel(QuadBitBoard *positions, GameStat
 
 
 // -------------------------------------------------------------------------
+// Fused 2-level leaf kernel: replaces the last BFS level + leaf kernel.
+// Each thread makes a move to get a child position, generates all legal
+// moves for that child, then for each grandchild makes the move and counts.
+// Saves massive memory (no need for the huge move/index arrays of the last
+// BFS level) and improves cache locality (siblings processed together).
+// -------------------------------------------------------------------------
+__global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *states,
+                                          int *indices, CMove *moves,
+                                          uint64 *globalPerftCounter, int nThreads)
+{
+    uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (index >= nThreads)
+        return;
+
+    // Load parent position and make the first move (level N -> level N-1)
+    uint32 boardIndex = indices[index];
+    QuadBitBoard pos = loadQuadBB(&positions[boardIndex]);
+    GameState gs = states[boardIndex];
+    uint8 color = gs.chance;
+
+    CMove move = moves[index];
+    makeMove(&pos, &gs, move, color);
+
+    // Generate all legal moves at level N-1 into local memory
+    CMove childMoves[MAX_MOVES];
+    uint8 childColor = gs.chance;  // after makeMove, chance is flipped
+    int nChildMoves = generateMoves(&pos, &gs, childColor, childMoves);
+
+    // For each child move: make it and count grandchildren
+    int totalCount = 0;
+    for (int i = 0; i < nChildMoves; i++)
+    {
+        QuadBitBoard childPos = pos;
+        GameState childGs = gs;
+        makeMove(&childPos, &childGs, childMoves[i], childColor);
+        totalCount += countMoves(&childPos, &childGs, !childColor);
+    }
+
+    // Warp-wide reduction before atomic add
+    warpReduce(totalCount);
+
+    int laneId = threadIdx.x & 0x1f;
+
+    if (laneId == 0)
+    {
+        atomicAdd(globalPerftCounter, (uint64)totalCount);
+    }
+}
+
+
+// -------------------------------------------------------------------------
 // Host-driven BFS perft
 // -------------------------------------------------------------------------
 
@@ -436,8 +488,13 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, int depth, void *gpu
     GameState *d_prevStates = d_rootState;
     int currentCount = rootMoveCount;
 
-    // BFS loop: depth-1 down to 2 are intermediate levels, level 1 is the leaf
-    for (int level = depth - 1; level >= 2; level--)
+    // Use fused 2-level leaf for depth >= 4: saves memory and improves locality.
+    // The 2-level leaf handles the last 2 levels, so BFS stops one level earlier.
+    bool use2LevelLeaf = (depth >= 4);
+    int bfsMinLevel = use2LevelLeaf ? 3 : 2;
+
+    // BFS loop: depth-1 down to bfsMinLevel are intermediate levels
+    for (int level = depth - 1; level >= bfsMinLevel; level--)
     {
         // Allocate boards, states, and move counts
         QuadBitBoard *d_curBoards = alloc.alloc<QuadBitBoard>(currentCount);
@@ -506,12 +563,23 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, int depth, void *gpu
         currentCount = nextLevelCount;
     }
 
-    // Final level: make move and count (leaf)
+    // Final level: leaf kernel
     {
         int nBlocks = (currentCount - 1) / BLOCK_SIZE + 1;
-        makeMove_and_perft_leaf_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
-                                                                  d_indices, d_moves,
-                                                                  d_perftCounter, currentCount);
+        if (use2LevelLeaf)
+        {
+            // Fused 2-level leaf: each thread handles 2 levels (make move + generate + count all)
+            fused_2level_leaf_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                               d_indices, d_moves,
+                                                               d_perftCounter, currentCount);
+        }
+        else
+        {
+            // Standard 1-level leaf: each thread handles 1 level (make move + count)
+            makeMove_and_perft_leaf_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                                      d_indices, d_moves,
+                                                                      d_perftCounter, currentCount);
+        }
         cudaDeviceSynchronize();
     }
 
