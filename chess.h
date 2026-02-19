@@ -45,11 +45,6 @@ int __static_assert(int static_assert_failed[(expr)?1:-1])
 #define WHITE   0
 #define BLACK   1
 
-#define SLIDING_PIECE_INDEX(piece) ((piece) - BISHOP)
-// BISHOP 0
-// ROOK   1
-// QUEEN  3
-
 
 // another encoding (a bit faster and simpler than above)
 // bits  01 color	1 - white, 2 - black
@@ -69,15 +64,6 @@ int __static_assert(int static_assert_failed[(expr)?1:-1])
 #define FILE(index088)              (index088 & 0xF)
 
 #define ISVALIDPOS(index088)        (((index088) & 0x88) == 0)
-
-// special move flags
-#define CASTLE_QUEEN_SIDE  1
-#define CASTLE_KING_SIDE   2
-#define EN_PASSENT         3
-#define PROMOTION_QUEEN    4
-#define PROMOTION_ROOK     5
-#define PROMOTION_BISHOP   6
-#define PROMOTION_KNIGHT   7
 
 // castle flags in board position (1 and 2)
 #define CASTLE_FLAG_KING_SIDE   1
@@ -128,17 +114,6 @@ struct BoardPosition
 };
 
 CT_ASSERT(sizeof(BoardPosition) == 128);
-
-// size 4 bytes
-struct Move
-{
-    uint8  src;             // source position of the piece
-    uint8  dst;             // destination position
-    uint8  capturedPiece;   // the piece captured (if any)
-    uint8  flags;           // flags to indicate special moves, e.g castling, en passent, promotion, etc
-};
-CT_ASSERT(sizeof(Move) == 4);
-
 
 // Quad-bitboard representation: 4 bitboards encode piece type + color per square
 // bb[0] = color bit (1 for black pieces, 0 for white/empty)
@@ -238,14 +213,6 @@ struct FancyMagicEntry
 // max no of moves possible for a given board position (this can be as large as 218 ?)
 // e.g, test this FEN string "3Q4/1Q4Q1/4Q3/2Q4R/Q4Q2/3Q4/1Q4Rp/1K1BBNNk w - - 0 1"
 #define MAX_MOVES 256
-
-#define MAX_GAME_LENGTH 300
-
-// max no of moves possible by a single piece
-// actually it's 27 for a queen when it's in the center of the board
-#define MAX_SINGLE_PIECE_MOVES 32
-
-#include "utils.h"
 
 
 #endif

@@ -1,6 +1,8 @@
+#pragma once
+
 #include "cuda_runtime.h"
 #include <chrono>
-
+#include "chess.h"
 
 /** Declarations for class/methods in Util.cpp **/
 
@@ -39,9 +41,6 @@ private:
     // gets the numeric code of the piece represented by a character
     static uint8 getPieceCode(char piece);
 
-    // Gets char representation of a piece code
-    //static char getPieceChar(uint8 code);
-
     CUDA_CALLABLE_MEMBER static char getPieceChar(uint8 code)
     {
         const char pieceCharMapping[] = { '.', 'P', 'N', 'B', 'R', 'Q', 'K' };
@@ -66,20 +65,6 @@ private:
 
 
 public:
-
-    // reads a board from text file
-    static void readBoardFromFile(char filename[], char board[8][8]);
-    static void readBoardFromFile(char filename[], BoardPosition *pos);
-
-
-    // displays the board in human readable form
-    //static void dispBoard(char board[8][8]); 
-    //static void dispBoard(BoardPosition *pos);
-
-    // displays a move in human readable form
-    static void displayMove(Move move);
-
-    // methods to display the board (in the above form)
 
     CUDA_CALLABLE_MEMBER static void dispBoard(char board[8][8])
     {
@@ -189,75 +174,10 @@ public:
         dispBoard(&p);
     }
 
-    CUDA_CALLABLE_MEMBER static void displayCompactMove(CMove move)
-    {
-        Move move2;
-        move2.capturedPiece = (move.getFlags() & CM_FLAG_CAPTURE);
-        move2.src = move.getFrom();
-        move2.dst = move.getTo();
-        displayMoveBB(move2);
-    }
-
-    CUDA_CALLABLE_MEMBER static void displayMoveBB(Move move)
-    {
-        uint8 r1, c1, r2, c2;
-        r1 = (move.src >> 3) + 1;
-        c1 = (move.src) & 0x7;
-
-        r2 = (move.dst >> 3) + 1;
-        c2 = (move.dst) & 0x7;
-
-        char sep = move.capturedPiece ? '*' : '-';
-
-        printf("%c%d%c%c%d ",
-            c1 + 'a',
-            r1,
-            sep,
-            c2 + 'a',
-            r2);
-
-    }
-
-
-    static void getCompactMoveString(CMove move, char *str)
-    {
-        Move move2;
-        move2.capturedPiece = (move.getFlags() & CM_FLAG_CAPTURE);
-        move2.src = move.getFrom();
-        move2.dst = move.getTo();
-        getMoveBBString(move2, str);
-    }
-
-    static void getMoveBBString(Move move, char *str)
-    {
-        uint8 r1, c1, r2, c2;
-        r1 = (move.src >> 3) + 1;
-        c1 = (move.src) & 0x7;
-
-        r2 = (move.dst >> 3) + 1;
-        c2 = (move.dst) & 0x7;
-
-        char sep = move.capturedPiece ? '*' : '-';
-
-        sprintf(str, "%c%d%c%c%d ",
-            c1 + 'a',
-            r1,
-            sep,
-            c2 + 'a',
-            r2);
-
-    }
-
-    //static void board088ToChar(char board[8][8], BoardPosition *pos);
-    static void boardCharTo088(BoardPosition *pos, char board[8][8]);
-
     static void board088ToQuadBB(QuadBitBoard *qbb, GameState *gs, BoardPosition *pos088);
 
     // reads a FEN string and sets board and other Game Data accorodingly
     static void readFENString(const char fen[], BoardPosition *pos);
-
-    // clears the board (i.e, makes all squares blank)
-    static void clearBoard(BoardPosition *pos);
 };
 
 
@@ -294,29 +214,3 @@ private:
     cudaEvent_t mStart, mStop;
 };
 
-// for timing CPU code : start
-static double gTime;
-#define START_TIMER { \
-    auto t_start = std::chrono::high_resolution_clock::now();
-
-#define STOP_TIMER \
-    auto t_end = std::chrono::high_resolution_clock::now();\
-    gTime = std::chrono::duration<double>(t_end-t_start).count();}
-// for timing CPU code : end
-
-
-static void hugeMemset(void *data, uint64 size)
-{
-    uint8 *mem = (uint8*)data;
-    const uint64 c4G = 4ull * 1024 * 1024 * 1024;
-
-    while (size > c4G)
-    {
-        cudaMemset(mem, 0, c4G);
-
-        mem += c4G;
-        size -= c4G;
-    }
-
-    cudaMemset(mem, 0, size);
-}

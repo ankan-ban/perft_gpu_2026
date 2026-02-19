@@ -1,3 +1,5 @@
+#pragma once
+
 #include "chess.h"
 
 #ifdef __linux__ 
@@ -840,15 +842,6 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 }
 
 
-// not used
-#if 0
-    CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 queenAttacks(uint64 queens, uint64 pro)
-    {
-        return rookAttacks  (queens, pro) |
-               bishopAttacks(queens, pro) ;
-    }
-#endif
-
     CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 kingAttacks(uint64 kingSet) 
     {
         uint64 attacks = eastOne(kingSet) | westOne(kingSet);
@@ -969,217 +962,8 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 #endif
     }
 
-    static void init()
-    {
-        // initialize the empty board attack tables
-        for (uint8 i=0; i < 64; i++)
-        {
-            uint64 x = BIT(i);
-            uint64 north = northAttacks(x, ALLSET);
-            uint64 south = southAttacks(x, ALLSET);
-            uint64 east  = eastAttacks (x, ALLSET);
-            uint64 west  = westAttacks (x, ALLSET);
-            uint64 ne    = northEastAttacks(x, ALLSET);
-            uint64 nw    = northWestAttacks(x, ALLSET);
-            uint64 se    = southEastAttacks(x, ALLSET);
-            uint64 sw    = southWestAttacks(x, ALLSET);
-            
-            RookAttacks  [i] = north | south | east | west;
-            BishopAttacks[i] = ne | nw | se | sw;
-            QueenAttacks [i] = RookAttacks[i] | BishopAttacks[i];
-            KnightAttacks[i] = knightAttacks(x);
-            KingAttacks[i]   = kingAttacks(x);
+    static void init();
 
-            // TODO: initialize pawn attack table
-            // probably not really needed (as pawn attack calculation is simple enough)
-        }
-
-        // initialize the Between and Line tables
-        for (uint8 i=0; i<64; i++)
-            for (uint8 j=0; j<64; j++)
-            {
-                if (i <= j)
-                {
-                    Between[i][j] = squaresInBetween(i, j);
-                    Between[j][i] = Between[i][j];
-                }
-                Line[i][j] = squaresInLine(i, j);
-            }
-
-        // initialize magic lookup tables
-#if USE_SLIDING_LUT == 1
-        srand (time(NULL));
-        for (int square = A1; square <= H8; square++)
-        {
-            uint64 thisSquare = BIT(square);
-            uint64 mask    = sqRookAttacks(square) & (~thisSquare);
-
-            // mask off squares that don't matter
-            if ((thisSquare & RANK1) == 0)
-                mask &= ~RANK1;
-
-            if ((thisSquare & RANK8) == 0)
-                mask &= ~RANK8;
-
-            if ((thisSquare & FILEA) == 0)
-                mask &= ~FILEA;
-
-            if ((thisSquare & FILEH) == 0)
-                mask &= ~FILEH;
-            
-            RookAttacksMasked[square] = mask;
-
-            mask = sqBishopAttacks(square)  & (~thisSquare) & CENTRAL_SQUARES;
-            BishopAttacksMasked[square] = mask;
-#if USE_FANCY_MAGICS != 1
-            rookMagics  [square] = findRookMagicForSquare  (square, rookMagicAttackTables  [square]);
-            bishopMagics[square] = findBishopMagicForSquare(square, bishopMagicAttackTables[square]);
-#endif
-        }
-
-        // initialize fancy magic lookup table
-        memset(fancy_magic_lookup_table, 0, sizeof(fancy_magic_lookup_table));
-        int globalOffsetRook = 0;
-        int globalOffsetBishop = 0;
-
-        for (int square = A1; square <= H8; square++)
-        {
-            int uniqueBishopAttacks = 0, uniqueRookAttacks=0;
-
-            uint64 rookMagic = findRookMagicForSquare  (square, &fancy_magic_lookup_table[rook_magics_fancy[square].position], rook_magics_fancy[square].factor, 
-                                                        &fancy_byte_RookLookup[globalOffsetRook], &fancy_byte_magic_lookup_table[rook_magics_fancy[square].position], &uniqueRookAttacks);
-            assert(rookMagic == rook_magics_fancy[square].factor);
-
-            uint64 bishopMagic = findBishopMagicForSquare  (square, &fancy_magic_lookup_table[bishop_magics_fancy[square].position], bishop_magics_fancy[square].factor, 
-                                                           &fancy_byte_BishopLookup[globalOffsetBishop], &fancy_byte_magic_lookup_table[bishop_magics_fancy[square].position], &uniqueBishopAttacks);
-            assert(bishopMagic == bishop_magics_fancy[square].factor);
-
-            rook_magics_fancy  [square].offset = globalOffsetRook;
-            globalOffsetRook += uniqueRookAttacks;
-
-            bishop_magics_fancy[square].offset = globalOffsetBishop;
-            globalOffsetBishop += uniqueBishopAttacks;
-        }
-
-        // printf("\ntotal bishop unique attacks: %d\n", globalOffsetBishop);
-        // printf("\ntotal rook unique attacks: %d\n", globalOffsetRook);
-#endif        
-
-        // copy all the lookup tables from CPU's memory to GPU memory
-#ifndef SKIP_CUDA_CODE
-        cudaError_t err = cudaMemcpyToSymbol(gBetween, Between, sizeof(Between));
-        if (err != S_OK) printf("For copying between table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-
-        err = cudaMemcpyToSymbol(gLine, Line, sizeof(Line));
-        if (err != S_OK) printf("For copying line table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(gRookAttacks, RookAttacks, sizeof(RookAttacks));
-        if (err != S_OK) printf("For copying RookAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(gBishopAttacks, BishopAttacks, sizeof(BishopAttacks));
-        if (err != S_OK) printf("For copying BishopAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-        
-        err = cudaMemcpyToSymbol(gQueenAttacks, QueenAttacks, sizeof(QueenAttacks));
-        if (err != S_OK) printf("For copying QueenAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(gKnightAttacks, KnightAttacks, sizeof(KnightAttacks));
-        if (err != S_OK) printf("For copying KnightAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(gKingAttacks, KingAttacks, sizeof(KingAttacks));
-        if (err != S_OK) printf("For copying KingAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        // Copy magical tables
-        err = cudaMemcpyToSymbol(gRookAttacksMasked, RookAttacksMasked, sizeof(RookAttacksMasked));
-        if (err != S_OK) printf("For copying RookAttacksMasked table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(gBishopAttacksMasked, BishopAttacksMasked , sizeof(BishopAttacksMasked));
-        if (err != S_OK) printf("For copying BishopAttacksMasked  table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-        
-        err = cudaMemcpyToSymbol(gRookMagics, rookMagics, sizeof(rookMagics));
-        if (err != S_OK) printf("For copying rookMagics  table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(gBishopMagics, bishopMagics, sizeof(bishopMagics));
-        if (err != S_OK) printf("For copying bishopMagics table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(gRookMagicAttackTables, rookMagicAttackTables, sizeof(rookMagicAttackTables));
-        if (err != S_OK) printf("For copying RookMagicAttackTables, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(gBishopMagicAttackTables, bishopMagicAttackTables, sizeof(bishopMagicAttackTables));
-        if (err != S_OK) printf("For copying bishopMagicAttackTables, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(g_fancy_magic_lookup_table, fancy_magic_lookup_table, sizeof(fancy_magic_lookup_table));
-        if (err != S_OK) printf("For copying fancy_magic_lookup_table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(g_bishop_magics_fancy, bishop_magics_fancy, sizeof(bishop_magics_fancy));
-        if (err != S_OK) printf("For copying bishop_magics_fancy, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(g_rook_magics_fancy, rook_magics_fancy, sizeof(rook_magics_fancy));
-        if (err != S_OK) printf("For copying rook_magics_fancy, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(g_fancy_byte_magic_lookup_table, fancy_byte_magic_lookup_table, sizeof(fancy_byte_magic_lookup_table));
-        if (err != S_OK) printf("For copying fancy_byte_magic_lookup_table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-        
-        err = cudaMemcpyToSymbol(g_fancy_byte_BishopLookup, fancy_byte_BishopLookup, sizeof(fancy_byte_BishopLookup));
-        if (err != S_OK) printf("For copying fancy_byte_BishopLookup, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(g_fancy_byte_RookLookup, fancy_byte_RookLookup, sizeof(fancy_byte_RookLookup));
-        if (err != S_OK) printf("For copying fancy_byte_RookLookup, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-
-#if USE_CONSTANT_MEMORY_FOR_LUT == 1
-        printf("Copying tables to constant memory...\n");
-        /*
-        err = cudaMemcpyToSymbol(cBetween, Between, sizeof(Between));
-        if (err != S_OK) printf("For copying between table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
-        */
-        err = cudaMemcpyToSymbol(cLine, Line, sizeof(Line));
-        if (err != S_OK) printf("For copying line table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(cRookAttacks, RookAttacks, sizeof(RookAttacks));
-        if (err != S_OK) printf("For copying RookAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(cBishopAttacks, BishopAttacks, sizeof(BishopAttacks));
-        if (err != S_OK) printf("For copying BishopAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-        
-        err = cudaMemcpyToSymbol(cKnightAttacks, KnightAttacks, sizeof(KnightAttacks));
-        if (err != S_OK) printf("For copying KnightAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(cKingAttacks, KingAttacks, sizeof(KingAttacks));
-        if (err != S_OK) printf("For copying KingAttacks table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(cRookAttacksMasked, RookAttacksMasked, sizeof(RookAttacksMasked));
-        if (err != S_OK) printf("For copying RookAttacksMasked table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(cBishopAttacksMasked, BishopAttacksMasked , sizeof(BishopAttacksMasked));
-        if (err != S_OK) printf("For copying BishopAttacksMasked  table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(cRookMagics, rookMagics, sizeof(rookMagics));
-        if (err != S_OK) printf("For copying rookMagics  table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(cBishopMagics, bishopMagics, sizeof(bishopMagics));
-        if (err != S_OK) printf("For copying bishopMagics table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(c_bishop_magics_fancy, bishop_magics_fancy, sizeof(bishop_magics_fancy));
-        if (err != S_OK) printf("For copying bishop_magics_fancy, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(c_rook_magics_fancy, rook_magics_fancy, sizeof(rook_magics_fancy));
-        if (err != S_OK) printf("For copying rook_magics_fancy, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        /*
-        err = cudaMemcpyToSymbol(c_fancy_byte_BishopLookup, fancy_byte_BishopLookup, sizeof(fancy_byte_BishopLookup));
-        if (err != S_OK) printf("For copying fancy_byte_BishopLookup, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-
-        err = cudaMemcpyToSymbol(c_fancy_byte_RookLookup, fancy_byte_RookLookup, sizeof(fancy_byte_RookLookup));
-        if (err != S_OK) printf("For copying fancy_byte_RookLookup, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-        */
-#endif
-#endif  //#ifndef SKIP_CUDA_CODE
-    }
-
-    static void destroy()
-    {
-    }
-	
     CUDA_CALLABLE_MEMBER static CPU_FORCE_INLINE uint64 findPinnedPieces (uint64 myKing, uint64 myPieces, uint64 enemyBishops, uint64 enemyRooks, uint64 allPieces, uint8 kingIndex)
     {
         // check for sliding attacks to the king's square
@@ -2455,8 +2239,21 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 
 };
 
-
-
-
+// Free function wrapper for generateMoves (dispatches on template chance)
+CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint32 generateMoves(QuadBitBoard *pos, GameState *gs, uint8 color, CMove *genMoves)
+{
+#if USE_TEMPLATE_CHANCE_OPT == 1
+    if (color == BLACK)
+    {
+        return MoveGeneratorBitboard::generateMoves<BLACK>(pos, gs, genMoves);
+    }
+    else
+    {
+        return MoveGeneratorBitboard::generateMoves<WHITE>(pos, gs, genMoves);
+    }
+#else
+    return MoveGeneratorBitboard::generateMoves(pos, gs, genMoves, color);
+#endif
+}
 
 

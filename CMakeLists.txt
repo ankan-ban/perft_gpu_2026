@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD 17)
 
 add_executable(perft_gpu
     perft.cu
+    perft_kernels.cu
+    launcher.cu
     util.cpp
     GlobalVars.cpp
     Magics.cpp

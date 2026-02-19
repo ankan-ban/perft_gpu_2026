@@ -1,8 +1,6 @@
-#include "device_launch_parameters.h"
+#include <cuda_runtime.h>
+#include "utils.h"
 #include "perft_bb.h"
-#include <math.h>
-#include <stdlib.h>
-
 #include "launcher.h"
 
 int main(int argc, char *argv[])
@@ -21,7 +19,7 @@ int main(int argc, char *argv[])
 
     // Initialize single GPU (device 0)
     initGPU(0);
-    MoveGeneratorBitboard::init();
+    initMoveGen();
 
     char fen[1024] = "";
     int maxDepth = 10;

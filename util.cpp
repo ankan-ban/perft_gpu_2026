@@ -1,10 +1,11 @@
 #include "chess.h"
+#include "utils.h"
 
 
-// Utilsity functions for reading FEN String, EPD file, displaying board, etc
+// Utility functions for reading FEN String, displaying board, etc
 
 // gets the numeric code of the piece represented by a character
-uint8 Utils::getPieceCode(char piece) 
+uint8 Utils::getPieceCode(char piece)
 {
 	switch(piece) {
 	case 'p':
@@ -37,57 +38,6 @@ uint8 Utils::getPieceCode(char piece)
 	}
 }
 
-/* 
-  Format of board in text file (e.g. Starting Position):
-
-  rnbqkbnr
-  pppppppp
-  ........
-  ........
-  ........
-  ........
-  PPPPPPPP
-  RNBQKBNR
-*/
-
-// methods to read a board from text file
-void Utils::readBoardFromFile(char filename[], char board[8][8]) {
-	FILE * fp = fopen(filename, "r");
-	char buf[100];
-	for(int i=0;i<8;i++) {
-		fscanf(fp, "%s", buf);
-		for(int j=0;j<8;j++)
-			board[i][j] = buf[j];
-	}
-	fclose(fp);
-}
-
-// convert to char board
-void Utils::boardCharTo088(BoardPosition *pos, char board[8][8])
-{
-    int i, j;
-    int index088 = 0;
-
-    for (i = 7; i >= 0; i--)
-    {
-        for (j = 0; j < 8; j++)
-        {
-            char piece = board[i][j];
-            pos->board[index088] = getPieceCode(piece);
-            index088++;
-        }
-        // skip 8 cells of padding
-        index088 += 8;
-    }
-}
-
-void Utils::readBoardFromFile(char filename[], BoardPosition *pos) 
-{
-    char board[8][8];
-    readBoardFromFile(filename, board);
-    boardCharTo088(pos, board);
-}
-
 // convert 088 board to quad bit board
 void Utils::board088ToQuadBB(QuadBitBoard *qbb, GameState *gs, BoardPosition *pos088)
 {
@@ -118,37 +68,6 @@ void Utils::board088ToQuadBB(QuadBitBoard *qbb, GameState *gs, BoardPosition *po
     gs->halfMoveCounter = pos088->halfMoveCounter;
 }
 
-
-void Utils::clearBoard(BoardPosition *pos)
-{
-	for(int i=0;i<8;i++)
-		for (int j=0;j<8;j++)
-			pos->board[INDEX088(i, j)] = EMPTY_SQUARE;
-}
-
-// displays a move object
-void Utils::displayMove(Move move) 
-{
-	char dispString[10];
-
-    uint8 r1, c1, r2, c2;
-    r1 = RANK(move.src)+1;
-    c1 = FILE(move.src);
-
-    r2 = RANK(move.dst)+1;
-	c2 = FILE(move.dst);
-
-	char sep = move.capturedPiece ? '*' : '-';
-
-	sprintf(dispString, "%c%d%c%c%d ", 
-            c1+'a', 
-            r1, 
-			sep,
-            c2+'a', 
-            r2);
-
-    printf(dispString);
-}
 
 // reads a FEN string into the given BoardPosition object
 

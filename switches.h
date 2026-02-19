@@ -1,3 +1,5 @@
+#pragma once
+
 // this file contains the various compile time settings/switches
 
 // can be tuned as per need
@@ -26,7 +28,7 @@
 
 // bitwise magic instead of if/else for castle flag updation
 // turning this off helps Maxwell a little
-#define USE_BITWISE_MAGIC_FOR_CASTLE_FLAG_UPDATION 0
+#define USE_BITWISE_MAGIC_FOR_CASTLE_FLAG_UPDATION 1
 
 // intel core 2 doesn't have popcnt instruction
 #define USE_POPCNT 0
