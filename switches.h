@@ -45,6 +45,11 @@
 // use lookup table for knight moves
 #define USE_KNIGHT_LUT 1
 
+// use per-piece LUT for bulk attack map in findAttackedSquares
+// trades heavy ALU ops for LSU lookups — doesn't help on RTX 4090 (ALU latency < LUT latency)
+#define USE_KING_LUT_FOR_ATTACK_MAP 0
+#define USE_KNIGHT_LUT_FOR_ATTACK_MAP 0
+
 // use lookup table (magics) for sliding moves
 // reduces performance by ~7% for GPU version
 // helps maxwell a lot (> +10%)

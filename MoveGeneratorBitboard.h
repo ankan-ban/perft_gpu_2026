@@ -1024,13 +1024,12 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         }
 
         // 2. knight attacks
-		// using multi-attack LUT is significantly more expensive for GPU
-#if 0   // USE_KNIGHT_LUT == 1
-        attacked |= multiKnightAttacks(enemyKnights); // again a tiny bit faster
+#if USE_KNIGHT_LUT_FOR_ATTACK_MAP == 1
+        attacked |= multiKnightAttacks(enemyKnights);
 #else
-        attacked |= knightAttacks(enemyKnights);	
+        attacked |= knightAttacks(enemyKnights);
 #endif
-        
+
         // 3. bishop attacks
 		attacked |= multiBishopAttacks(enemyBishops, emptySquares | myKing); // squares behind king are also under threat (in the sense that king can't go there)
 
@@ -1038,8 +1037,8 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 		attacked |= multiRookAttacks(enemyRooks, emptySquares | myKing); // squares behind king are also under threat
 
         // 5. King attacks
-#if 0   // USE_KING_LUT == 1
-        attacked |= sqKingAttacks(bitScan(enemyKing));	// a very tiny bit faster!
+#if USE_KING_LUT_FOR_ATTACK_MAP == 1
+        attacked |= sqKingAttacks(bitScan(enemyKing));
 #else
         attacked |= kingAttacks(enemyKing);
 #endif
