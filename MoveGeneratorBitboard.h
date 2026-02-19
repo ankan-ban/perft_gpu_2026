@@ -1314,9 +1314,11 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
                 }
                 else
                 {
-                    uint64 propogator = (~allPieces) | enPassentCapturedPiece | pawn;
-                    uint64 causesCheck = (eastAttacks(enemyRooks, propogator) | westAttacks(enemyRooks, propogator)) &
-                                         myKing;
+                    // Check if removing both pawns reveals a rook attack on king along the rank.
+                    // Mask to king's rank only — vertical attacks are irrelevant here.
+                    uint64 modifiedOcc = allPieces ^ enPassentCapturedPiece ^ pawn;
+                    uint64 rankMask = RANK1 << ((kingIndex >> 3) * 8);
+                    uint64 causesCheck = rookAttacks(myKing, ~modifiedOcc) & enemyRooks & rankMask;
                     if (!causesCheck)
                     {
                         addCompactMove(&nMoves, &genMoves, bitScan(pawn), bitScan(enPassentTarget), CM_FLAG_EP_CAPTURE);
@@ -1674,9 +1676,13 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
                 }
                 else
                 {
-                    uint64 propogator = emptySquares | enPassentCapturedPiece | pawn;
-                    uint64 causesCheck = (eastAttacks(enemyRooks, propogator) | westAttacks(enemyRooks, propogator)) &
-                                         myKing;
+                    // Check if removing both pawns reveals a rook attack on king along the rank.
+                    // Use magic rook lookup from king's square with modified occupancy
+                    // instead of Kogge-Stone east/west attacks (~14 ALU ops → 1 magic lookup).
+                    // Mask to king's rank only — vertical attacks are irrelevant here.
+                    uint64 modifiedOcc = allPieces ^ enPassentCapturedPiece ^ pawn;
+                    uint64 rankMask = RANK1 << ((kingIndex >> 3) * 8);
+                    uint64 causesCheck = rookAttacks(myKing, ~modifiedOcc) & enemyRooks & rankMask;
                     if (!causesCheck)
                     {
                         nMoves++;
