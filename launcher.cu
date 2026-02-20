@@ -58,6 +58,10 @@ static uint64 floorPow2(uint64 n)
     return (n + 1) >> 1;
 }
 
+// Overridable TT budgets (set from CLI before calling initTT)
+int g_deviceTTBudgetMB = DEVICE_TT_BUDGET_MB;
+int g_hostTTBudgetMB = HOST_TT_BUDGET_MB;
+
 void initTT(int launchDepth, int maxDepth)
 {
 #if USE_TT
@@ -71,7 +75,21 @@ void initTT(int launchDepth, int maxDepth)
 
     if (numDeviceTTs > 0)
     {
-        uint64 budgetBytes = (uint64)DEVICE_TT_BUDGET_MB * 1024 * 1024;
+        uint64 budgetBytes;
+        if (g_deviceTTBudgetMB > 0)
+        {
+            budgetBytes = (uint64)g_deviceTTBudgetMB * 1024 * 1024;
+        }
+        else
+        {
+            // Auto-size: use 75% of free VRAM for device TTs
+            size_t freeMem = 0, totalMem = 0;
+            cudaMemGetInfo(&freeMem, &totalMem);
+            budgetBytes = (uint64)(freeMem * 3 / 4);
+            printf("Auto device TT budget: %llu MB (75%% of %llu MB free)\n",
+                   (unsigned long long)(budgetBytes / (1024*1024)),
+                   (unsigned long long)(freeMem / (1024*1024)));
+        }
         uint64 perTableBytes = budgetBytes / numDeviceTTs;
         uint64 entriesPerTable = floorPow2(perTableBytes / sizeof(TTEntry));
         if (entriesPerTable < 1024) entriesPerTable = 1024;
@@ -103,7 +121,7 @@ void initTT(int launchDepth, int maxDepth)
 
     if (numHostTTs > 0)
     {
-        uint64 budgetBytes = (uint64)HOST_TT_BUDGET_MB * 1024 * 1024;
+        uint64 budgetBytes = (uint64)g_hostTTBudgetMB * 1024 * 1024;
         uint64 perTableBytes = budgetBytes / numHostTTs;
         uint64 entriesPerTable = floorPow2(perTableBytes / sizeof(TTEntry));
         if (entriesPerTable < 1024) entriesPerTable = 1024;

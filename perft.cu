@@ -3,17 +3,38 @@
 #include "utils.h"
 #include "launcher.h"
 
+// TT budget overrides (defined in launcher.cu)
+extern int g_deviceTTBudgetMB;
+extern int g_hostTTBudgetMB;
 
 int main(int argc, char *argv[])
 {
-    // Check for -cpu flag anywhere in args
+    // Parse flags from anywhere in args
     bool cpuMode = false;
     for (int i = 1; i < argc; i++)
     {
+        bool consumed = false;
         if (strcmp(argv[i], "-cpu") == 0)
         {
             cpuMode = true;
-            // Shift remaining args down to remove -cpu
+            consumed = true;
+        }
+        else if (strcmp(argv[i], "-dtt") == 0 && i + 1 < argc)
+        {
+            g_deviceTTBudgetMB = atoi(argv[i + 1]);
+            // Remove both -dtt and value
+            for (int j = i; j < argc - 2; j++) argv[j] = argv[j + 2];
+            argc -= 2; i--; continue;
+        }
+        else if (strcmp(argv[i], "-htt") == 0 && i + 1 < argc)
+        {
+            g_hostTTBudgetMB = atoi(argv[i + 1]);
+            for (int j = i; j < argc - 2; j++) argv[j] = argv[j + 2];
+            argc -= 2; i--; continue;
+        }
+
+        if (consumed)
+        {
             for (int j = i; j < argc - 1; j++)
                 argv[j] = argv[j + 1];
             argc--;
