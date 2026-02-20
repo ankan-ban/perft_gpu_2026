@@ -1479,65 +1479,39 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             // TODO: Think more about it
             myPieces &= ~pinned;
 
-            // 1. pawn moves
+            // 1. pawn moves in bulk (no per-pawn loop)
             uint64 myPawns = allPawns & myPieces;
+            uint64 emptySquares = ~allPieces;
+            uint64 checkingRankDoublePush = RANK3 << (chance * 24);
 
-            // checking rank for pawn double pushes
-            uint64 checkingRankDoublePush = RANK3 << (chance * 24);           // rank 3 or rank 6
+            // Single pushes
+            uint64 dsts = ((chance == WHITE) ? northOne(myPawns) : southOne(myPawns)) & emptySquares;
+            uint64 safeDsts = dsts & safeSquares;
+            uint64 promos = safeDsts & (RANK1 | RANK8);
+            nMoves += popCount(safeDsts ^ promos) + (4 * popCount(promos));
 
+            // Double pushes (only from pawns whose single push landed on checking rank)
+            uint64 doubleDsts = ((chance == WHITE) ? northOne(dsts & checkingRankDoublePush) :
+                                                     southOne(dsts & checkingRankDoublePush)) & emptySquares & safeSquares;
+            nMoves += popCount(doubleDsts);
+
+            // Captures (West and East)
+            uint64 westCaps = ((chance == WHITE) ? northWestOne(myPawns) : southWestOne(myPawns)) & enemyPieces & safeSquares;
+            promos = westCaps & (RANK1 | RANK8);
+            nMoves += popCount(westCaps ^ promos) + (4 * popCount(promos));
+
+            uint64 eastCaps = ((chance == WHITE) ? northEastOne(myPawns) : southEastOne(myPawns)) & enemyPieces & safeSquares;
+            promos = eastCaps & (RANK1 | RANK8);
+            nMoves += popCount(eastCaps ^ promos) + (4 * popCount(promos));
+
+            // En-passent evasion
             uint64 enPassentTarget = getEpTarget<chance>(gs->enPassent);
-
-            // en-passent can only save the king if the piece captured is the attacker
             uint64 enPassentCapturedPiece = (chance == WHITE) ? southOne(enPassentTarget) : northOne(enPassentTarget);
-            if (enPassentCapturedPiece != attackers)
-                enPassentTarget = 0;
-
-            while (myPawns)
+            if (enPassentTarget && (enPassentCapturedPiece == attackers))
             {
-                uint64 pawn = getOne(myPawns);
-
-                // pawn push
-                uint64 dst = ((chance == WHITE) ? northOne(pawn) : southOne(pawn)) & (~allPieces);
-                if (dst)
-                {
-                    if (dst & safeSquares)
-                    {
-                        if (dst & (RANK1 | RANK8))
-                            nMoves += 4;
-                        else
-                            nMoves++;
-                    }
-                    else
-                    {
-                        dst = ((chance == WHITE) ? northOne(dst & checkingRankDoublePush):
-                                                   southOne(dst & checkingRankDoublePush) ) & (safeSquares) &(~allPieces);
-                        if (dst)
-                        {
-                            nMoves++;
-                        }
-                    }
-                }
-
-                // captures
-                uint64 westCapture = (chance == WHITE) ? northWestOne(pawn) : southWestOne(pawn);
-                uint64 eastCapture = (chance == WHITE) ? northEastOne(pawn) : southEastOne(pawn);
-                dst = (westCapture | eastCapture) & enemyPieces & safeSquares;
-                if (dst)
-                {
-                    if (dst & (RANK1 | RANK8))
-                        nMoves += 4;
-                    else
-                        nMoves++;
-                }
-
-                // en-passent
-                dst = (westCapture | eastCapture) & enPassentTarget;
-                if (dst)
-                {
-                    nMoves++;
-                }
-
-                myPawns ^= pawn;
+                uint64 epSources = ((chance == WHITE) ? northWestOne(myPawns) : southWestOne(myPawns)) & enPassentTarget;
+                epSources |= ((chance == WHITE) ? northEastOne(myPawns) : southEastOne(myPawns)) & enPassentTarget;
+                nMoves += popCount(epSources);
             }
 
             // 2. knight moves
