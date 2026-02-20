@@ -3,8 +3,11 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include "MoveGeneratorBitboard.h"
-#include "perft_bb.h"
+#include "launcher.h"
 #include "utils.h"
+
+// GPU memory buffer for BFS tree storage (allocated in initGPU, freed in main)
+void *preAllocatedBufferHost;
 
 void initGPU(int gpu)
 {
@@ -125,4 +128,51 @@ void perftCPU(QuadBitBoard *pos, GameState *gs, uint8 rootColor, uint32 depth)
         printf(", nps: %llu", (unsigned long long)((double)result / seconds));
     printf("\n");
     fflush(stdout);
+}
+
+
+// -------------------------------------------------------------------------
+// Template-optimized CPU perft
+// -------------------------------------------------------------------------
+
+template <uint8 chance>
+static uint64 perft_cpu(QuadBitBoard *pos, GameState *gs, uint32 depth)
+{
+    if (depth == 1)
+    {
+        return MoveGeneratorBitboard::countMoves<chance>(pos, gs);
+    }
+
+    CMove moves[MAX_MOVES];
+    int nMoves = MoveGeneratorBitboard::generateMoves<chance>(pos, gs, moves);
+
+    uint64 count = 0;
+    for (int i = 0; i < nMoves; i++)
+    {
+        QuadBitBoard childPos = *pos;
+        GameState childGs = *gs;
+        MoveGeneratorBitboard::makeMove<chance>(&childPos, &childGs, moves[i]);
+        count += perft_cpu<!chance>(&childPos, &childGs, depth - 1);
+    }
+    return count;
+}
+
+uint64 perft_cpu_dispatch(QuadBitBoard *pos, GameState *gs, uint8 color, uint32 depth)
+{
+    if (depth == 0)
+        return 1;
+    if (color == WHITE)
+        return perft_cpu<WHITE>(pos, gs, depth);
+    else
+        return perft_cpu<BLACK>(pos, gs, depth);
+}
+
+
+// -------------------------------------------------------------------------
+// Move generator initialization
+// -------------------------------------------------------------------------
+
+void initMoveGen()
+{
+    MoveGeneratorBitboard::init();
 }

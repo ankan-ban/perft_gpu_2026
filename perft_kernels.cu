@@ -2,11 +2,8 @@
 
 #include <cub/cub.cuh>
 
-// the routines that actually generate the moves
 #include "MoveGeneratorBitboard.h"
-
-// preallocated GPU memory buffer (host-side pointer)
-void *preAllocatedBufferHost;
+#include "launcher.h"
 
 #define ALIGN_UP(addr, align)   (((addr) + (align) - 1) & (~((align) - 1)))
 #define MEM_ALIGNMENT 32    // 32-byte alignment needed for v4.u64 loads/stores
@@ -619,44 +616,8 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
 
 
 // -------------------------------------------------------------------------
-// Template-optimized CPU perft
-// -------------------------------------------------------------------------
-
-template <uint8 chance>
-static uint64 perft_cpu(QuadBitBoard *pos, GameState *gs, uint32 depth)
-{
-    if (depth == 1)
-    {
-        return MoveGeneratorBitboard::countMoves<chance>(pos, gs);
-    }
-
-    CMove moves[MAX_MOVES];
-    int nMoves = MoveGeneratorBitboard::generateMoves<chance>(pos, gs, moves);
-
-    uint64 count = 0;
-    for (int i = 0; i < nMoves; i++)
-    {
-        QuadBitBoard childPos = *pos;
-        GameState childGs = *gs;
-        MoveGeneratorBitboard::makeMove<chance>(&childPos, &childGs, moves[i]);
-        count += perft_cpu<!chance>(&childPos, &childGs, depth - 1);
-    }
-    return count;
-}
-
-uint64 perft_cpu_dispatch(QuadBitBoard *pos, GameState *gs, uint8 color, uint32 depth)
-{
-    if (depth == 0)
-        return 1;
-    if (color == WHITE)
-        return perft_cpu<WHITE>(pos, gs, depth);
-    else
-        return perft_cpu<BLACK>(pos, gs, depth);
-}
-
-
-// -------------------------------------------------------------------------
-// Move generator initialization
+// Move generator initialization (called via initMoveGen() in launcher.cu)
+// Must stay here: cudaMemcpyToSymbol needs the __device__ symbols above.
 // -------------------------------------------------------------------------
 
 void MoveGeneratorBitboard::init()
@@ -820,9 +781,4 @@ void MoveGeneratorBitboard::init()
         err = cudaMemcpyToSymbol(g_epTargetWhite, epWhite, sizeof(epWhite));
         if (err != S_OK) printf("For copying epTargetWhite, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
     }
-}
-
-void initMoveGen()
-{
-    MoveGeneratorBitboard::init();
 }

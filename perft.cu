@@ -1,7 +1,6 @@
 #include <cuda_runtime.h>
 #include <string.h>
 #include "utils.h"
-#include "perft_bb.h"
 #include "launcher.h"
 
 int main(int argc, char *argv[])
