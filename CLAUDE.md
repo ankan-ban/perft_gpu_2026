@@ -295,6 +295,13 @@ When asked to benchmark, follow this protocol:
 - Asymmetric offsets (northWest=+7, southWest=-9) are error-prone
 - Per-pawn loop is already efficient for generateMoves since it needs from/to pairs anyway
 
+### Unfused bfsMinLevel=2 with TT+dedup [REJECTED — 52% regression startpos, OOM pos2]
+- Changed bfsMinLevel from 3 to 2 to get dedup at one more level
+- Replaces fused 2-level leaf with simple 1-level leaf
+- Startpos: 3240B nps (was 6760B), pos2: OOM/hung at perft(7)
+- Same mechanism as 3-level leaf: massive BFS arrays at level 2 overwhelm memory
+- The fused kernel's memory savings are essential — can't replace with BFS expansion
+
 ### Block size / blocks-per-SM tuning [CONFIRMED — 384/3 is optimal]
 - Tested: 256/3, 256/4, 256/5, 320/3, 320/4, 352/3, 352/4, 384/2, 384/3, 384/4, 512/2, 512/3, 416/3, 448/3
 - 512+ and 416+ block sizes fail to build (register budget)

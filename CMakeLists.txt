@@ -12,6 +12,7 @@ add_executable(perft_gpu
     GlobalVars.cpp
     Magics.cpp
     zobrist.cpp
+    randoms.cpp
 )
 
 target_include_directories(perft_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

@@ -38,8 +38,14 @@ __device__ __forceinline__ bool ttProbe(const TTTable &tt, Hash128 hash, uint64 
 {
     if (!tt.entries) return false;
     uint64 idx = hash.lo & tt.mask;
-    uint64 storedCount = __ldg(&tt.entries[idx].count);
-    uint64 storedVerif = __ldg(&tt.entries[idx].verification);
+
+    // 128-bit atomic load via PTX to read both fields consistently
+    uint64 storedVerif, storedCount;
+    const TTEntry *ptr = &tt.entries[idx];
+    asm volatile("ld.global.v2.u64 {%0,%1}, [%2];"
+        : "=l"(storedVerif), "=l"(storedCount)
+        : "l"(ptr));
+
     if ((storedVerif ^ storedCount) == hash.hi)
     {
         *outCount = storedCount;
@@ -52,8 +58,12 @@ __device__ __forceinline__ void ttStore(const TTTable &tt, Hash128 hash, uint64 
 {
     if (!tt.entries) return;
     uint64 idx = hash.lo & tt.mask;
-    tt.entries[idx].count = count;
-    tt.entries[idx].verification = hash.hi ^ count;
+
+    // 128-bit atomic store via PTX to write both fields consistently
+    uint64 verification = hash.hi ^ count;
+    TTEntry *ptr = &tt.entries[idx];
+    asm volatile("st.global.v2.u64 [%0], {%1,%2};"
+        :: "l"(ptr), "l"(verification), "l"(count));
 }
 
 #endif // __CUDACC__

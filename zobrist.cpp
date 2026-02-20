@@ -1,45 +1,23 @@
-// Zobrist random number generation and initialization
+// Zobrist random number initialization
+// Uses the same pre-generated random numbers as the reference perft_gpu project
+// (generated from Intel Ivy Bridge RDRAND instruction, stored in randoms.cpp)
 
 #include "zobrist.h"
+#include <string.h>
 
 // CPU-side Zobrist tables
 ZobristRandoms zobrist1;
 ZobristRandoms zobrist2;
 
-// splitmix64: high-quality PRNG for Zobrist key generation
-// Reference: http://xoshiro.di.unimi.it/splitmix64.c
-static uint64 splitmix64(uint64 &state)
-{
-    state += 0x9e3779b97f4a7c15ULL;
-    uint64 z = state;
-    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
-    return z ^ (z >> 31);
-}
-
-static void fillZobristRandoms(ZobristRandoms &zr, uint64 &state)
-{
-    for (int color = 0; color < 2; color++)
-        for (int piece = 0; piece < 6; piece++)
-            for (int sq = 0; sq < 64; sq++)
-                zr.pieces[color][piece][sq] = splitmix64(state);
-
-    for (int color = 0; color < 2; color++)
-        for (int side = 0; side < 2; side++)
-            zr.castling[color][side] = splitmix64(state);
-
-    for (int file = 0; file < 8; file++)
-        zr.enPassant[file] = splitmix64(state);
-
-    zr.sideToMove = splitmix64(state);
-}
+// Pre-generated random numbers (defined in randoms.cpp, from the reference perft_gpu project)
+extern unsigned long long randoms[];
 
 void initZobrist()
 {
-    // Fixed seeds for deterministic, reproducible hash values
-    uint64 state1 = 0xBEEF1234CAFE5678ULL;
-    uint64 state2 = 0xDEAD5678FACE1234ULL;
-
-    fillZobristRandoms(zobrist1, state1);
-    fillZobristRandoms(zobrist2, state2);
+    // Use the same offsets as the reference project for the two Zobrist sets.
+    // Our ZobristRandoms (781 uint64s) is slightly smaller than the reference's (782)
+    // because we don't have the 'depth' field, but the first 781 fields match exactly:
+    // pieces[2][6][64] (768) + castling[2][2] (4) + enPassant[8] (8) + sideToMove (1) = 781
+    memcpy(&zobrist1, &randoms[1200], sizeof(ZobristRandoms));
+    memcpy(&zobrist2, &randoms[333], sizeof(ZobristRandoms));
 }
