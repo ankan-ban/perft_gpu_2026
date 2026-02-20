@@ -529,11 +529,8 @@ __global__ void add_tt_hits_and_store(uint64 *positionCounts, uint64 *ttHitCount
     if (idx >= numPositions) return;
     uint64 totalCount = positionCounts[idx] + ttHitCounts[idx];
     positionCounts[idx] = totalCount;
-    // Upsweep TT store disabled — per-position values at depth 4+ are individually
-    // wrong (though totals are correct), corrupting future GPU BFS calls via TT probe.
-    // Root cause under investigation. See CLAUDE.md for debugging notes.
-    // if (!redirects || redirects[idx] < 0)
-    //     ttStore(tt, posHashes[idx], totalCount);
+    if (!redirects || redirects[idx] < 0)
+        ttStore(tt, posHashes[idx], totalCount);
 }
 // Warp-reduce uint64 and atomically add to global counter
 __global__ void reduce_sum_uint64(uint64 *values, uint64 *globalSum, int n)
@@ -636,7 +633,6 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
         int nBlocks = (currentCount - 1) / BLOCK_SIZE + 1;
         TTTable curTT = {nullptr, 0};
 #if USE_TT
-        // DEBUG: only probe device TT for depths 3-4 (skip 5-6)
         if (remainingDepth >= 3 && remainingDepth < MAX_TT_DEPTH)
             curTT = deviceTTs[remainingDepth];
 #endif
@@ -691,7 +687,10 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
         int nextLevelCount = 0;
         cudaMemcpy(&nextLevelCount, d_moveCounts + currentCount - 1, sizeof(int), cudaMemcpyDeviceToHost);
         if (nextLevelCount == 0)
+        {
+            currentCount = 0;  // No children to process at the leaf level
             break;
+        }
         // Allocate next level arrays
         int *d_newIndices = alloc.alloc<int>(nextLevelCount);
         CMove *d_newMoves = alloc.alloc<CMove>(nextLevelCount);
@@ -806,43 +805,6 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
                                                          levelSaves[lvl].hashes, upsweepTT,
                                                          levelSaves[lvl].redirects, parentCount,
                                                          rd);
-            // DEBUG: level sum verification (disabled — passed, no mismatches)
-            #if 0
-            {
-                uint64 *d_lvlSum = alloc.alloc<uint64>(1);
-                cudaMemset(d_lvlSum, 0, sizeof(uint64));
-                int nb = (parentCount - 1) / BLOCK_SIZE + 1;
-                reduce_sum_uint64<<<nb, BLOCK_SIZE>>>(d_parentCounts, d_lvlSum, parentCount);
-
-                uint64 *d_childSum = alloc.alloc<uint64>(1);
-                cudaMemset(d_childSum, 0, sizeof(uint64));
-                nb = (currentChildCount - 1) / BLOCK_SIZE + 1;
-                reduce_sum_uint64<<<nb, BLOCK_SIZE>>>(currentChildCounts, d_childSum, currentChildCount);
-
-                uint64 *d_ttSum = alloc.alloc<uint64>(1);
-                cudaMemset(d_ttSum, 0, sizeof(uint64));
-                nb = (parentCount - 1) / BLOCK_SIZE + 1;
-                reduce_sum_uint64<<<nb, BLOCK_SIZE>>>(levelSaves[lvl].ttHitCounts, d_ttSum, parentCount);
-
-                cudaDeviceSynchronize();
-                uint64 lvlSum, childSum, ttSum;
-                cudaMemcpy(&lvlSum, d_lvlSum, sizeof(uint64), cudaMemcpyDeviceToHost);
-                cudaMemcpy(&childSum, d_childSum, sizeof(uint64), cudaMemcpyDeviceToHost);
-                cudaMemcpy(&ttSum, d_ttSum, sizeof(uint64), cudaMemcpyDeviceToHost);
-
-                static int dbgCount = 0;
-                if (dbgCount < 20 && depth == 7 && lvlSum != childSum + ttSum)
-                {
-                    dbgCount++;
-                    printf("  LEVEL SUM MISMATCH rd=%d: parentSum=%llu childSum=%llu ttSum=%llu expected=%llu diff=%lld\n",
-                           rd, (unsigned long long)lvlSum, (unsigned long long)childSum,
-                           (unsigned long long)ttSum, (unsigned long long)(childSum + ttSum),
-                           (long long)(lvlSum - childSum - ttSum));
-                }
-            }
-
-            #endif
-
             // Apply dedup redirects: copy original's count to duplicates
             if (levelSaves[lvl].redirects)
             {
@@ -854,7 +816,6 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
             currentChildIndices = levelSaves[lvl].indicesToParent;
         }
         // Sum the root children's counts = total perft result
-        // First save the leaf atomic counter for debug comparison
         cudaMemset(d_perftCounter, 0, sizeof(uint64));
         int nBlk = (currentChildCount - 1) / BLOCK_SIZE + 1;
         reduce_sum_uint64<<<nBlk, BLOCK_SIZE>>>(currentChildCounts, d_perftCounter, currentChildCount);

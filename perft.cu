@@ -125,9 +125,6 @@ int main(int argc, char *argv[])
 
         for (int depth = 1; depth <= maxDepth; depth++)
         {
-            // DEBUG: clear device TTs before each iteration to test cross-iteration corruption
-            // clearDeviceTTs();
-
             perftLauncher(&testBB, &testGS, rootColor, depth, launchDepth);
             fflush(stdout);
         }

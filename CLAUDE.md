@@ -36,7 +36,7 @@
 - `Magics.cpp` — magic number discovery routines
 
 ## Performance
-- RTX 6000 Pro Blackwell (with TT): Startpos perft 9 ~1737B nps (1.40s), Position 2 perft 7 ~1765B nps (0.212s)
+- RTX 6000 Pro Blackwell (with TT + upsweep store): Startpos perft 9 ~6865B nps (0.36s), Position 2 perft 7 ~4846B nps (0.077s)
 - RTX 6000 Pro Blackwell (no TT baseline): Startpos perft 9 ~1027B nps (2.38s), Position 2 perft 7 ~1825B nps (0.205s)
 - RTX 4090: Startpos perft 9 ~729B nps (3.34s), Position 2 perft 7 ~1103B nps (0.34s)
 - RTX 4090: Startpos perft 10 ~639B nps (108s) — previously impossible (OOM)
@@ -134,10 +134,11 @@ When asked to benchmark, follow this protocol:
 - Entries: 16 bytes each, power-of-2 table sizes
 
 ### Known TT Behavior
-- Startpos perft 9: +69% speedup (many transpositions at high depth, warm TT from iterative depths)
-- Pos2 perft 7: -3% (hash overhead exceeds savings at this depth with limited warmup)
+- Startpos perft 9: +569% speedup with upsweep TT store (6865B vs 1027B nps)
+- Pos2 perft 7: +165% speedup with upsweep TT store (4846B vs 1825B nps)
 - TT benefit scales with depth: deeper perft = more transpositions = more TT hits
 - The iterative depth loop (perft 1, 2, ..., N) naturally warms TTs for later iterations
+- Upsweep TT store is critical: caches per-position results across GPU BFS calls
 
 ## Committed Optimizations
 
@@ -173,13 +174,14 @@ When asked to benchmark, follow this protocol:
 - Same pattern as countMoves: northOne(myPawns), popCount on masked results
 - Eliminates per-pawn branches on a cold path (~4-5% of positions are in check)
 
-### Transposition tables [+69% startpos perft 9, -3% pos2 perft 7]
+### Transposition tables [+569% startpos perft 9, +165% pos2 perft 7]
 - 128-bit Zobrist hash (splitmix64, two ZobristRandoms sets), separate updateHashAfterMove()
 - 16-byte TTEntry with XOR lockless verification, separate TT per remaining depth
 - GPU: hash flow through BFS + TT probe in downsweep + upsweep to store per-position counts
 - CPU: probe/store host TTs in recursive path, caches entire GPU BFS calls
 - Leaf TT: fused kernel probes/stores at depth 2 (HASH_IN_LEAF_KERNEL switch)
 - Upsweep result is authoritative (leaf global atomic misses TT-hit subtrees)
+- BFS early-exit fix: when nextLevelCount=0, set currentCount=0 to prevent leaf double-counting
 
 ### Code cleanup [cleanliness]
 - Removed 13 compile-time flags, ~2.6MB unused tables
@@ -295,17 +297,13 @@ When asked to benchmark, follow this protocol:
 - Asymmetric offsets (northWest=+7, southWest=-9) are error-prone
 - Per-pawn loop is already efficient for generateMoves since it needs from/to pairs anyway
 
-### Upsweep TT store bug [OPEN — correctness issue at LD < auto]
-- The upsweep computes per-position perft values that sum correctly but are INDIVIDUALLY wrong at depth 4+
-- Same position (128-bit hash) gets different perft values across GPU BFS calls, monotonically increasing by ~10K
-- Mismatches always at depth 6, idx=0 (the highest BFS level)
-- All at the `add_tt_hits_and_store` step — NOT hash collision, NOT dedup, NOT random quality
-- Key finding: with TT probe OFF + store ON = no mismatches. With probe ON + store ON = mismatches
-- TT probes at lower depths cause higher-depth per-position values to change
-- Level totals always preserved (childSum + ttSum == lvlSum)
-- Reference-style restructuring (TT hits add to parent during downsweep) attempted but introduced new bugs
-- Next debugging step: track specific hash values (e.g., cdad2653e01cc738:b918af90f79b915b) and log every TT store for those hashes to find when the wrong value enters
-- Upsweep TT store currently DISABLED for correctness. Performance impact: ~4x slower than with store enabled
+### BFS early-exit double-counting bug [FIXED]
+- When all positions at a BFS level had TT hits, nextLevelCount=0 caused early loop break
+- The break happened BEFORE d_prevBoards was updated and currentCount was reset
+- Result: leaf kernel processed stale positions (from previous level) using root indices (all zeros)
+- This added phantom perft(2) counts to position 0 on top of its correct TT hit value
+- Fix: set currentCount=0 when breaking on nextLevelCount=0, preventing leaf kernel from running
+- The ~10K monotonic increase per call matched perft(3) of the GPU BFS call's root position
 
 ### Unfused bfsMinLevel=2 with TT+dedup [REJECTED — 52% regression startpos, OOM pos2]
 - Changed bfsMinLevel from 3 to 2 to get dedup at one more level
