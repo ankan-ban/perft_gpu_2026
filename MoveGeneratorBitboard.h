@@ -804,33 +804,25 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 
         // It doesn't matter if we process more attackers behind the first attackers
         // They will be taken care of when we check for no. of obstructing squares between king and the attacker
-        /*
-        uint64 b = bishopAttacks(myKing, ~enemyPieces) & enemyBishops;
-        uint64 r = rookAttacks  (myKing, ~enemyPieces) & enemyRooks;
-        */
-
         uint64 b = sqBishopAttacks(kingIndex) & enemyBishops;
         uint64 r = sqRookAttacks  (kingIndex) & enemyRooks;
 
         uint64 attackers = b | r;
 
-        // for every attacker we need to chess if there is a single obstruction between 
+        // for every attacker we need to check if there is a single obstruction between
         // the attacker and the king, and if so - the obstructor is pinned
         uint64 pinned = BB_EMPTY;
         while (attackers)
         {
             uint64 attacker = getOne(attackers);
+            uint8 attackerIndex = bitScan(attacker);
 
-            // bitscan shouldn't be too expensive but it will be good to 
-            // figure out a way do find obstructions without having to get square index of attacker
-            uint8 attackerIndex = bitScan(attacker);    // same as bitscan on attackers
-
-            uint64 squaresInBetween = sqsInBetween(attackerIndex, kingIndex); // same as using obstructed() function
+            uint64 squaresInBetween = sqsInBetween(attackerIndex, kingIndex);
             uint64 piecesInBetween = squaresInBetween & allPieces;
             if (isSingular(piecesInBetween))
                 pinned |= piecesInBetween;
 
-            attackers ^= attacker;  // same as &= ~attacker
+            attackers ^= attacker;
         }
 
         return pinned;
@@ -1504,14 +1496,17 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             promos = eastCaps & (RANK1 | RANK8);
             nMoves += popCount(eastCaps ^ promos) + (4 * popCount(promos));
 
-            // En-passent evasion
+            // En-passent evasion (fast early exit — EP in check is extremely rare)
             uint64 enPassentTarget = getEpTarget<chance>(gs->enPassent);
-            uint64 enPassentCapturedPiece = (chance == WHITE) ? southOne(enPassentTarget) : northOne(enPassentTarget);
-            if (enPassentTarget && (enPassentCapturedPiece == attackers))
+            if (enPassentTarget)
             {
-                uint64 epSources = ((chance == WHITE) ? northWestOne(myPawns) : southWestOne(myPawns)) & enPassentTarget;
-                epSources |= ((chance == WHITE) ? northEastOne(myPawns) : southEastOne(myPawns)) & enPassentTarget;
-                nMoves += popCount(epSources);
+                uint64 enPassentCapturedPiece = (chance == WHITE) ? southOne(enPassentTarget) : northOne(enPassentTarget);
+                if (enPassentCapturedPiece == attackers)
+                {
+                    uint64 epSources = ((chance == WHITE) ? northWestOne(myPawns) : southWestOne(myPawns)) & enPassentTarget;
+                    epSources |= ((chance == WHITE) ? northEastOne(myPawns) : southEastOne(myPawns)) & enPassentTarget;
+                    nMoves += popCount(epSources);
+                }
             }
 
             // 2. knight moves
