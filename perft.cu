@@ -5,8 +5,6 @@
 
 int main(int argc, char *argv[])
 {
-    BoardPosition testBoard;
-
     // Check for -cpu flag anywhere in args
     bool cpuMode = false;
     for (int i = 1; i < argc; i++)
@@ -54,20 +52,14 @@ int main(int argc, char *argv[])
         printf("\nAs no parameters were provided... running default test\n");
     }
 
-    if (strlen(fen) > 5)
-    {
-        Utils::readFENString(fen, &testBoard);
-    }
-    else
-    {
-        Utils::readFENString("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", &testBoard);
-    }
-    Utils::dispBoard(&testBoard);
-
     QuadBitBoard testBB;
     GameState testGS;
-    uint8 rootColor = testBoard.chance;
-    Utils::board088ToQuadBB(&testBB, &testGS, &testBoard);
+    uint8 rootColor;
+
+    if (strlen(fen) > 5)
+        readFENString(fen, &testBB, &testGS, &rootColor);
+    else
+        readFENString("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", &testBB, &testGS, &rootColor);
 
     if (cpuMode)
     {

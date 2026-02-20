@@ -1,177 +1,95 @@
 #include "chess.h"
 #include "utils.h"
+#include <string.h>
 
-
-// Utility functions for reading FEN String, displaying board, etc
-
-// gets the numeric code of the piece represented by a character
-uint8 Utils::getPieceCode(char piece)
-{
-	switch(piece) {
-	case 'p':
-		return COLOR_PIECE(BLACK, PAWN);
-	case 'n':
-		return COLOR_PIECE(BLACK, KNIGHT);
-	case 'b':
-		return COLOR_PIECE(BLACK, BISHOP);
-	case 'r':
-		return COLOR_PIECE(BLACK, ROOK);
-	case 'q':
-		return COLOR_PIECE(BLACK, QUEEN);
-	case 'k':
-		return COLOR_PIECE(BLACK, KING);
-	case 'P':
-		return COLOR_PIECE(WHITE, PAWN);
-	case 'N':
-		return COLOR_PIECE(WHITE, KNIGHT);
-	case 'B':
-		return COLOR_PIECE(WHITE, BISHOP);
-	case 'R':
-		return COLOR_PIECE(WHITE, ROOK);
-	case 'Q':
-		return COLOR_PIECE(WHITE, QUEEN);
-	case 'K':
-		return COLOR_PIECE(WHITE, KING);
-	default:
-		return EMPTY_SQUARE;
-
-	}
-}
-
-// convert 088 board to quad bit board
-void Utils::board088ToQuadBB(QuadBitBoard *qbb, GameState *gs, BoardPosition *pos088)
+// Parse FEN string directly into QuadBitBoard + GameState + color.
+// Merges the old FEN parser + board088ToQuadBB into one pass.
+void readFENString(const char fen[], QuadBitBoard *qbb, GameState *gs, uint8 *color)
 {
     memset(qbb, 0, sizeof(QuadBitBoard));
+    gs->raw = 0;
 
-    for (uint8 i = 0; i < 64; i++)
+    int i;
+    int row = 0, col = 0;
+
+    // 1. Piece placement (rank 8 down to rank 1)
+    for (i = 0; fen[i]; i++)
     {
-        uint8 rank = i >> 3;
-        uint8 file = i & 7;
-        uint8 index088 = INDEX088(rank, file);
-        uint8 colorpiece = pos088->board[index088];
-        if (colorpiece != EMPTY_SQUARE)
+        char c = fen[i];
+
+        if (c == '/' || c == '\\')
         {
-            uint8 color = COLOR(colorpiece);
-            uint8 piece = PIECE(colorpiece);
-            // quad encoding: bb[0] = color (1 for black), bb[1..3] = piece type bits
-            if (color == BLACK) qbb->bb[0] |= BIT(i);
-            if (piece & 1) qbb->bb[1] |= BIT(i);
-            if (piece & 2) qbb->bb[2] |= BIT(i);
-            if (piece & 4) qbb->bb[3] |= BIT(i);
+            row++; col = 0;
         }
-    }
-
-    gs->whiteCastle = pos088->whiteCastle;
-    gs->blackCastle = pos088->blackCastle;
-    gs->enPassent = pos088->enPassent;
-}
-
-
-// reads a FEN string into the given BoardPosition object
-
-/*
-Reference: (Wikipedia)
-
-A FEN record contains 6 fields. The separator between fields is a space. The fields are:
-
-   1. Piece placement (from white's perspective). Each rank is described, starting with rank 8 and ending with rank 1; within each rank, the contents of each square are described from file a through file h. White pieces are designated using upper-case letters ("KQRBNP"), Black by lowercase ("kqrbnp"). Blank squares are noted using digits 1 through 8 (the number of blank squares), and "/" separate ranks.
-   2. Active color. "w" means white moves next, "b" means black.
-   3. Castling availability. If neither side can castle, this is "-". Otherwise, this has one or more letters: "K" (White can castle kingside), "Q" (White can castle queenside), "k" (Black can castle kingside), and/or "q" (Black can castle queenside).
-   4. En passant target square in algebraic notation. If there's no en passant target square, this is "-". If a pawn has just made a 2-square move, this is the position "behind" the pawn.
-   5. Halfmove clock: This is the number of halfmoves since the last pawn advance or capture. This is used to determine if a draw can be claimed under the fifty move rule.
-   6. Fullmove number: The number of the full move. It starts at 1, and is incremented after Black's move.
-
-*/
-void Utils::readFENString(const char fen[], BoardPosition *pos)
-{
-	int i, j;
-	char curChar;
-	int row = 0, col = 0;
-
-    memset(pos, 0, sizeof(BoardPosition));
-
-	// 1. read the board
-	for(i=0;fen[i];i++) 
-    {
-		curChar = fen[i];
-
-
-		if(curChar=='/'||curChar=='\\') 
+        else if (c >= '1' && c <= '8')
         {
-			row++; col=0;
-		}
-		else if(curChar >= '1' && curChar <= '8') 
-        {	// blank squares
-			for(j = 0; j < curChar - '0'; j++)
+            col += c - '0';
+        }
+        else
+        {
+            // Determine piece type and color from character
+            uint8 piece = 0;
+            uint8 pieceColor = WHITE;
+            switch (c)
             {
-                pos->board[INDEX088(7-row, col)] = getPieceCode(curChar);
-				col++;
+            case 'p': piece = PAWN;   pieceColor = BLACK; break;
+            case 'n': piece = KNIGHT; pieceColor = BLACK; break;
+            case 'b': piece = BISHOP; pieceColor = BLACK; break;
+            case 'r': piece = ROOK;   pieceColor = BLACK; break;
+            case 'q': piece = QUEEN;  pieceColor = BLACK; break;
+            case 'k': piece = KING;   pieceColor = BLACK; break;
+            case 'P': piece = PAWN;   break;
+            case 'N': piece = KNIGHT; break;
+            case 'B': piece = BISHOP; break;
+            case 'R': piece = ROOK;   break;
+            case 'Q': piece = QUEEN;  break;
+            case 'K': piece = KING;   break;
+            default: break;
             }
-		}
-		else if(curChar=='k'||curChar=='q'||curChar=='r'||curChar=='b'||curChar=='n'||curChar=='p' ||
-				curChar=='K'||curChar=='Q'||curChar=='R'||curChar=='B'||curChar=='N'||curChar=='P') 
+
+            if (piece)
+            {
+                // FEN rank 8 = row 0, maps to board rank 7; rank 1 = row 7, maps to board rank 0
+                int bitIndex = (7 - row) * 8 + col;
+                uint64 bit = BIT(bitIndex);
+
+                if (pieceColor == BLACK) qbb->bb[0] |= bit;
+                if (piece & 1) qbb->bb[1] |= bit;
+                if (piece & 2) qbb->bb[2] |= bit;
+                if (piece & 4) qbb->bb[3] |= bit;
+
+                col++;
+            }
+        }
+
+        if (row >= 7 && col == 8) break;
+    }
+
+    i++;
+
+    // 2. Active color
+    while (fen[i] == ' ') i++;
+    *color = (fen[i] == 'b' || fen[i] == 'B') ? BLACK : WHITE;
+    i++;
+
+    // 3. Castling availability
+    while (fen[i] == ' ') i++;
+    while (fen[i] != ' ')
+    {
+        switch (fen[i])
         {
-            pos->board[INDEX088(7 - row, col)] = getPieceCode(curChar);
-			col++;
-		}
-
-		if(row >= 7 && col == 8) break;		// done with the board, set the flags now
-		
-	}
-
-	i++;
-	
-	// 2. read the chance
-	while(fen[i]==' ') 
+        case 'K': gs->whiteCastle |= CASTLE_FLAG_KING_SIDE;  break;
+        case 'Q': gs->whiteCastle |= CASTLE_FLAG_QUEEN_SIDE; break;
+        case 'k': gs->blackCastle |= CASTLE_FLAG_KING_SIDE;  break;
+        case 'q': gs->blackCastle |= CASTLE_FLAG_QUEEN_SIDE; break;
+        }
         i++;
-
-	if(fen[i]=='b' || fen[i]=='B') 
-    {
-        pos->chance = BLACK; 
-    }
-	else 
-    {
-        pos->chance = WHITE;
     }
 
-	i++;
+    // 4. En passant
+    while (fen[i] == ' ') i++;
+    if (fen[i] >= 'a' && fen[i] <= 'h')
+        gs->enPassent = fen[i] - 'a' + 1;
 
-	// 3. read the castle flags
-    pos->whiteCastle = pos->blackCastle = 0;
-
-	while(fen[i]==' ') 
-        i++;
-
-	while(fen[i]!= ' ') {
-		switch(fen[i]) {
-		case 'k':
-            pos->blackCastle |= CASTLE_FLAG_KING_SIDE;
-			break;
-		case 'q':
-            pos->blackCastle |= CASTLE_FLAG_QUEEN_SIDE;
-			break;
-		case 'K':
-            pos->whiteCastle |= CASTLE_FLAG_KING_SIDE;
-			break;
-		case 'Q':
-            pos->whiteCastle |= CASTLE_FLAG_QUEEN_SIDE;
-			break;
-		}
-		i++;
-	}
-
-	// 4. read en-passent flag
-    pos->enPassent = 0;
-
-	while(fen[i]==' ') 
-        i++;
-
-	if(fen[i] >= 'a' && fen[i] <= 'h')
-		pos->enPassent = fen[i] - 'a' + 1;
-	
-	while(fen[i]!=' ' && fen[i]) 
-        i++;
-	
-	//TODO: 5. read the half-move and the full move clocks
-
+    // Skip remaining fields (halfmove clock, fullmove number)
 }

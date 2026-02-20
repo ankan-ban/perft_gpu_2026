@@ -46,26 +46,7 @@ int __static_assert(int static_assert_failed[(expr)?1:-1])
 #define BLACK   1
 
 
-// another encoding (a bit faster and simpler than above)
-// bits  01 color	1 - white, 2 - black
-// bits 234 piece
-#define COLOR_PIECE(color, piece)      		((1+color) | (piece << 2))
-#define COLOR(colorpiece)              		(((colorpiece & 2) >> 1))
-#define PIECE(colorpiece)              		((colorpiece) >> 2)
-#define EMPTY_SQUARE						0x0
-#define ISEMPTY(colorpiece)					(!(colorpiece))
-#define IS_OF_COLOR(colorpiece, color)		((colorpiece) & (1 << (color)))
-#define IS_ENEMY_COLOR(colorpiece, color)	(IS_OF_COLOR(colorpiece, 1 - color))
-
-
-
-#define INDEX088(rank, file)        ((rank) << 4 | (file))
-#define RANK(index088)              (index088 >> 4)
-#define FILE(index088)              (index088 & 0xF)
-
-#define ISVALIDPOS(index088)        (((index088) & 0x88) == 0)
-
-// castle flags in board position (1 and 2)
+// castle flags (1 and 2)
 #define CASTLE_FLAG_KING_SIDE   1
 #define CASTLE_FLAG_QUEEN_SIDE  2
 
@@ -81,39 +62,6 @@ enum eSquare
     A7, B7, C7, D7, E7, F7, G7, H7,
     A8, B8, C8, D8, E8, F8, G8, H8,
 };
-
-// size 128 bytes
-// let's hope this fits in register file
-struct BoardPosition
-{
-    union
-    {
-        uint8 board[128];    // the 0x88 board
-
-        struct
-        {
-            uint8 row0[8];  uint8 padding0[3];
-
-            uint8 chance;           // whose move it is
-            uint8 whiteCastle;      // whether white can castle
-            uint8 blackCastle;      // whether black can castle
-            uint8 enPassent;        // col + 1 (where col is the file on which enpassent is possible)
-            uint8 halfMoveCounter;  // to detect draw using 50 move rule
-
-            uint8 row1[8]; uint8 padding1[8];
-            uint8 row2[8]; uint8 padding2[8];
-            uint8 row3[8]; uint8 padding3[8];
-            uint8 row4[8]; uint8 padding4[8];
-            uint8 row5[8]; uint8 padding5[8];
-            uint8 row6[8]; uint8 padding6[8];
-            uint8 row7[8]; uint8 padding7[8];
-
-            // 60 unused bytes (padding) available for storing other structures if needed
-        };
-    };
-};
-
-CT_ASSERT(sizeof(BoardPosition) == 128);
 
 // Quad-bitboard representation: 4 bitboards encode piece type + color per square
 // bb[0] = color bit (1 for black pieces, 0 for white/empty)
