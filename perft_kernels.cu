@@ -526,6 +526,61 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
 // -------------------------------------------------------------------------
 
 #if USE_TT
+
+// -------------------------------------------------------------------------
+// BFS-level deduplication: detect identical positions within a BFS level.
+// Uses a hash table of packed (hashHi_32 | index) entries.
+// Duplicates get moveCounts=0 and a redirect to the original position.
+// -------------------------------------------------------------------------
+
+// Write position's packed entry (upper 32 bits of hash.hi | position index) to dedup table
+__global__ void write_dedup_table(Hash128 *hashes, uint64 *dedupTable, uint64 dedupMask, int n)
+{
+    uint32 idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    Hash128 h = hashes[idx];
+    uint64 slot = h.lo & dedupMask;
+    uint64 packed = (h.hi & 0xFFFFFFFF00000000ULL) | (uint64)idx;
+    dedupTable[slot] = packed;
+}
+
+// Check each position against the dedup table. If hash matches but index differs,
+// mark as duplicate: moveCounts=0, redirect stores the original's index.
+__global__ void check_duplicates(Hash128 *hashes, uint64 *dedupTable, uint64 dedupMask,
+                                  int *moveCounts, uint64 *ttHitCounts, int *redirects, int n)
+{
+    uint32 idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    Hash128 h = hashes[idx];
+    uint64 slot = h.lo & dedupMask;
+    uint64 entry = dedupTable[slot];
+    uint32 storedHi32 = (uint32)(entry >> 32);
+    uint32 storedIdx  = (uint32)(entry & 0xFFFFFFFF);
+    uint32 myHi32 = (uint32)(h.hi >> 32);
+
+    if (storedHi32 == myHi32 && storedIdx != idx)
+    {
+        // Duplicate detected — skip expansion, redirect to original
+        moveCounts[idx] = 0;
+        if (ttHitCounts) ttHitCounts[idx] = 0;
+        redirects[idx] = (int)storedIdx;
+    }
+    else
+    {
+        redirects[idx] = -1;
+    }
+}
+
+// After upsweep computes per-position counts, copy original's count to duplicates
+__global__ void apply_redirects(uint64 *positionCounts, int *redirects, int n)
+{
+    uint32 idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    int redir = redirects[idx];
+    if (redir >= 0)
+        positionCounts[idx] = positionCounts[redir];
+}
+
 // Sum each child's count into its parent using atomicAdd
 __global__ void reduce_by_parent(uint64 *childCounts, int *childToParent,
                                   uint64 *parentCounts, int numChildren)
@@ -538,8 +593,11 @@ __global__ void reduce_by_parent(uint64 *childCounts, int *childToParent,
 }
 
 // Add TT hit counts and store results in device TT
+// redirects: if non-null, skip TT store for duplicate positions (redirect >= 0)
+// to avoid overwriting the original's correct entry with the duplicate's zero
 __global__ void add_tt_hits_and_store(uint64 *positionCounts, uint64 *ttHitCounts,
-                                      Hash128 *posHashes, TTTable tt, int numPositions)
+                                      Hash128 *posHashes, TTTable tt,
+                                      int *redirects, int numPositions)
 {
     uint32 idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numPositions) return;
@@ -547,8 +605,9 @@ __global__ void add_tt_hits_and_store(uint64 *positionCounts, uint64 *ttHitCount
     uint64 totalCount = positionCounts[idx] + ttHitCounts[idx];
     positionCounts[idx] = totalCount;
 
-    // Store in device TT
-    ttStore(tt, posHashes[idx], totalCount);
+    // Only store in TT for non-duplicate positions
+    if (!redirects || redirects[idx] < 0)
+        ttStore(tt, posHashes[idx], totalCount);
 }
 
 // Warp-reduce uint64 and atomically add to global counter
@@ -570,6 +629,7 @@ struct BFSLevelSave
     int     *indicesToParent;   // maps positions at this level to parent level
     Hash128 *hashes;            // hash of each position at this level
     uint64  *ttHitCounts;       // TT hit counts (0 for misses)
+    int     *redirects;         // dedup redirects: -1 or index of original position
     int     count;              // number of positions at this level
     int     remainingDepth;     // for TT indexing
 };
@@ -684,10 +744,38 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
                                                                    curTT,
                                                                    currentCount, levelColor);
 
+        // BFS-level dedup: detect identical positions and skip expanding duplicates
+        int *d_redirects = nullptr;
+#if USE_TT
+        if (currentCount > 1)
+        {
+            // Dedup table: 2× position count, rounded up to power of 2
+            uint64 dedupSize = 1;
+            while (dedupSize < (uint64)currentCount * 2) dedupSize <<= 1;
+            uint64 *d_dedupTable = alloc.alloc<uint64>(dedupSize);
+            d_redirects = alloc.alloc<int>(currentCount);
+
+            if (d_dedupTable && d_redirects)
+            {
+                cudaMemset(d_dedupTable, 0xFF, dedupSize * sizeof(uint64));  // fill with invalid
+                uint64 dedupMask = dedupSize - 1;
+
+                write_dedup_table<<<nBlocks, BLOCK_SIZE>>>(d_curHashes, d_dedupTable, dedupMask, currentCount);
+                check_duplicates<<<nBlocks, BLOCK_SIZE>>>(d_curHashes, d_dedupTable, dedupMask,
+                    d_moveCounts, d_ttHitCounts, d_redirects, currentCount);
+            }
+            else
+            {
+                d_redirects = nullptr;  // OOM, skip dedup
+            }
+        }
+#endif
+
         // Save state for upsweep (before d_indices gets overwritten)
         levelSaves[numLevels].indicesToParent = d_indices;
         levelSaves[numLevels].hashes = d_curHashes;
         levelSaves[numLevels].ttHitCounts = d_ttHitCounts;
+        levelSaves[numLevels].redirects = d_redirects;
         levelSaves[numLevels].count = currentCount;
         levelSaves[numLevels].remainingDepth = remainingDepth;
         numLevels++;
@@ -833,7 +921,14 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
 
             nBlk = (parentCount - 1) / BLOCK_SIZE + 1;
             add_tt_hits_and_store<<<nBlk, BLOCK_SIZE>>>(d_parentCounts, levelSaves[lvl].ttHitCounts,
-                                                         levelSaves[lvl].hashes, upsweepTT, parentCount);
+                                                         levelSaves[lvl].hashes, upsweepTT,
+                                                         levelSaves[lvl].redirects, parentCount);
+
+            // Apply dedup redirects: copy original's count to duplicates
+            if (levelSaves[lvl].redirects)
+            {
+                apply_redirects<<<nBlk, BLOCK_SIZE>>>(d_parentCounts, levelSaves[lvl].redirects, parentCount);
+            }
 
             // Move up
             currentChildCounts = d_parentCounts;
