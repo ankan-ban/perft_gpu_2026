@@ -68,9 +68,11 @@ void initTT(int launchDepth, int maxDepth)
     memset(deviceTTs, 0, sizeof(deviceTTs));
     memset(hostTTs, 0, sizeof(hostTTs));
 
-    // Device TTs: depths 2 through launchDepth-1 (GPU BFS levels)
+    // Device TTs: depths 3 through launchDepth-1 (GPU BFS levels)
+    // Depth 2 is unused: bfsMinLevel=3 means no BFS level probes TT[2],
+    // and HASH_IN_LEAF_KERNEL=0 means the fused leaf doesn't probe it either.
     int numDeviceTTs = 0;
-    for (int d = 2; d < launchDepth && d < MAX_TT_DEPTH; d++)
+    for (int d = 3; d < launchDepth && d < MAX_TT_DEPTH; d++)
         numDeviceTTs++;
 
     if (numDeviceTTs > 0)
@@ -94,7 +96,7 @@ void initTT(int launchDepth, int maxDepth)
         uint64 entriesPerTable = floorPow2(perTableBytes / sizeof(TTEntry));
         if (entriesPerTable < 1024) entriesPerTable = 1024;
 
-        for (int d = 2; d < launchDepth && d < MAX_TT_DEPTH; d++)
+        for (int d = 3; d < launchDepth && d < MAX_TT_DEPTH; d++)
         {
             cudaError_t err = cudaMalloc(&deviceTTs[d].entries, entriesPerTable * sizeof(TTEntry));
             if (err != cudaSuccess)
