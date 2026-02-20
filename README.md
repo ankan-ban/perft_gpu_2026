@@ -11,7 +11,7 @@ Measured on a single NVIDIA RTX 4090 GPU:
 | Position | Depth | Nodes | Time | Speed |
 |---|---|---|---|---|
 | Starting position | 9 | 2,439,530,234,167 | 3.34s | ~729 billion nps |
-| Starting position | 10 | 69,352,859,712,417 | 108s | ~639 billion nps |
+| Starting position | 10 | 69,352,859,712,417 | 97.4s | ~712 billion nps |
 | [Position 2](https://www.chessprogramming.org/Perft_Results#Position_2) (Kiwipete) | 7 | 374,190,009,323 | 0.34s | ~1,103 billion nps |
 | [Position 3](https://www.chessprogramming.org/Perft_Results#Position_3) | 7 | 178,633,661 | - | - |
 
