@@ -19,3 +19,7 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
 // CPU perft
 void perftCPU(QuadBitBoard *pos, GameState *gs, uint8 rootColor, uint32 depth);
 uint64 perft_cpu_dispatch(QuadBitBoard *pos, GameState *gs, uint8 color, uint32 depth);
+
+// Transposition table management
+void initTT(int launchDepth, int maxDepth);
+void freeTT();

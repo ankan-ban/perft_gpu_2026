@@ -4,6 +4,8 @@
 
 #include "MoveGeneratorBitboard.h"
 #include "launcher.h"
+#include "zobrist.h"
+#include "tt.h"
 
 #define ALIGN_UP(addr, align)   (((addr) + (align) - 1) & (~((align) - 1)))
 #define MEM_ALIGNMENT 32    // 32-byte alignment needed for v4.u64 loads/stores
@@ -220,32 +222,62 @@ struct GpuBumpAllocator
 // GPU kernels for the host-driven BFS perft
 // -------------------------------------------------------------------------
 
-// Kernel: make move on parent board, produce child board, count child moves
+// Kernel: make move on parent board, produce child board, compute hash, count child moves, probe TT
 #if LIMIT_REGISTER_USE == 1
 __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 #endif
 __global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, GameState *parentStates,
+                                                 Hash128 *parentHashes,
                                                  int *indices, CMove *moves,
                                                  QuadBitBoard *outPositions, GameState *outStates,
-                                                 int *moveCounts, int nThreads, uint8 color)
+                                                 Hash128 *outHashes,
+                                                 int *moveCounts, uint64 *ttHitCounts,
+                                                 TTTable deviceTT,
+                                                 int nThreads, uint8 color)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
 
     int nMoves = 0;
+    uint64 ttHit = 0;
 
     if (index < nThreads)
     {
         int parentIndex = indices[index];
         QuadBitBoard pos = loadQuadBB(&parentBoards[parentIndex]);
         GameState gs = parentStates[parentIndex];
+        Hash128 hash = parentHashes[parentIndex];
         CMove move = moves[index];
 
+        // Pre-move state for hash update
+        uint8 srcPiece = getPieceAt(&pos, move.getFrom());
+        uint8 capPiece = getPieceAt(&pos, move.getTo());
+        uint8 oldCastleRaw = gs.raw;
+        uint8 oldEP = gs.enPassent;
+
         makeMove(&pos, &gs, move, color);
-        nMoves = countMoves(&pos, &gs, !color);
+
+        hash = updateHashAfterMove(hash, move, color,
+            srcPiece, capPiece, oldCastleRaw, gs.raw, oldEP, gs.enPassent);
+
+#if USE_TT
+        // Probe device TT
+        uint64 ttCount;
+        if (ttProbe(deviceTT, hash, &ttCount))
+        {
+            ttHit = ttCount;
+            nMoves = 0;  // Don't expand this position
+        }
+        else
+#endif
+        {
+            nMoves = countMoves(&pos, &gs, !color);
+        }
 
         storeQuadBB(&outPositions[index], pos);
         outStates[index] = gs;
+        outHashes[index] = hash;
         moveCounts[index] = nMoves;
+        if (ttHitCounts) ttHitCounts[index] = ttHit;
     }
 }
 
@@ -318,8 +350,11 @@ __global__ void generate_moves_kernel(QuadBitBoard *positions, GameState *states
 __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 #endif
 __global__ void makeMove_and_perft_leaf_kernel(QuadBitBoard *positions, GameState *states,
+                                                Hash128 *hashes,
                                                 int *indices, CMove *moves,
-                                                uint64 *globalPerftCounter, int nThreads, uint8 color)
+                                                uint64 *globalPerftCounter,
+                                                uint64 *perThreadCounts,
+                                                int nThreads, uint8 color)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -336,6 +371,10 @@ __global__ void makeMove_and_perft_leaf_kernel(QuadBitBoard *positions, GameStat
 
     // count moves at this position
     int nMoves = countMoves(&pos, &gs, !color);
+
+    // Write per-thread count for upsweep
+    if (perThreadCounts)
+        perThreadCounts[index] = (uint64)nMoves;
 
     // warp-wide reduction before atomic add
     warpReduce(nMoves);
@@ -396,8 +435,12 @@ __global__ void perft_2level_from_board_kernel(QuadBitBoard *boards, GameState *
 // -------------------------------------------------------------------------
 __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *states,
+                                          Hash128 *hashes,
                                           int *indices, CMove *moves,
-                                          uint64 *globalPerftCounter, int nThreads, uint8 color)
+                                          uint64 *globalPerftCounter,
+                                          uint64 *perThreadCounts,
+                                          TTTable leafTT,
+                                          int nThreads, uint8 color)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -408,12 +451,41 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
     uint32 boardIndex = indices[index];
     QuadBitBoard pos = loadQuadBB(&positions[boardIndex]);
     GameState gs = states[boardIndex];
-
     CMove move = moves[index];
+
+#if USE_TT && HASH_IN_LEAF_KERNEL
+    Hash128 parentHash = hashes[boardIndex];
+
+    // Pre-move state for hash update
+    uint8 srcPiece = getPieceAt(&pos, move.getFrom());
+    uint8 capPiece = getPieceAt(&pos, move.getTo());
+    uint8 oldCastleRaw = gs.raw;
+    uint8 oldEP = gs.enPassent;
+#endif
+
     makeMove(&pos, &gs, move, color);
 
+#if USE_TT && HASH_IN_LEAF_KERNEL
+    Hash128 hash = updateHashAfterMove(parentHash, move, color,
+        srcPiece, capPiece, oldCastleRaw, gs.raw, oldEP, gs.enPassent);
+
+    // Probe TT for this position (remaining depth = bfsMinLevel - 1)
+    uint64 ttCount;
+    if (ttProbe(leafTT, hash, &ttCount))
+    {
+        if (perThreadCounts) perThreadCounts[index] = ttCount;
+
+        // Still need warp-reduce + atomicAdd for global counter
+        int tc = (int)ttCount;
+        warpReduce(tc);
+        if ((threadIdx.x & 0x1f) == 0)
+            atomicAdd(globalPerftCounter, (uint64)tc);
+        return;
+    }
+#endif
+
     // Generate all legal moves at level N-1 into local memory.
-    // 218 moves covers the wrost case
+    // 218 moves covers the worst case
     CMove childMoves[218];
     uint8 childColor = !color;  // after makeMove, chance is flipped
     int nChildMoves = generateMoves(&pos, &gs, childColor, childMoves);
@@ -428,6 +500,15 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
         totalCount += countMoves(&childPos, &childGs, !childColor);
     }
 
+#if USE_TT && HASH_IN_LEAF_KERNEL
+    // Store result in TT
+    ttStore(leafTT, hash, (uint64)totalCount);
+#endif
+
+    // Write per-thread count for upsweep
+    if (perThreadCounts)
+        perThreadCounts[index] = (uint64)totalCount;
+
     // Warp-wide reduction before atomic add
     warpReduce(totalCount);
 
@@ -439,6 +520,59 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
     }
 }
 
+
+// -------------------------------------------------------------------------
+// Upsweep kernels: propagate per-position counts back through BFS levels
+// -------------------------------------------------------------------------
+
+#if USE_TT
+// Sum each child's count into its parent using atomicAdd
+__global__ void reduce_by_parent(uint64 *childCounts, int *childToParent,
+                                  uint64 *parentCounts, int numChildren)
+{
+    uint32 idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numChildren) return;
+    uint64 myCount = childCounts[idx];
+    if (myCount > 0)
+        atomicAdd(&parentCounts[childToParent[idx]], myCount);
+}
+
+// Add TT hit counts and store results in device TT
+__global__ void add_tt_hits_and_store(uint64 *positionCounts, uint64 *ttHitCounts,
+                                      Hash128 *posHashes, TTTable tt, int numPositions)
+{
+    uint32 idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numPositions) return;
+
+    uint64 totalCount = positionCounts[idx] + ttHitCounts[idx];
+    positionCounts[idx] = totalCount;
+
+    // Store in device TT
+    ttStore(tt, posHashes[idx], totalCount);
+}
+
+// Warp-reduce uint64 and atomically add to global counter
+__global__ void reduce_sum_uint64(uint64 *values, uint64 *globalSum, int n)
+{
+    uint32 idx = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64 val = (idx < n) ? values[idx] : 0;
+    // Warp reduction for uint64
+    for (int mask = 16; mask > 0; mask >>= 1)
+        val += __shfl_xor_sync(0xFFFFFFFF, val, mask);
+    if ((threadIdx.x & 31) == 0)
+        atomicAdd(globalSum, val);
+}
+#endif // USE_TT
+
+// Per-level saved state for the upsweep
+struct BFSLevelSave
+{
+    int     *indicesToParent;   // maps positions at this level to parent level
+    Hash128 *hashes;            // hash of each position at this level
+    uint64  *ttHitCounts;       // TT hit counts (0 for misses)
+    int     count;              // number of positions at this level
+    int     remainingDepth;     // for TT indexing
+};
 
 // -------------------------------------------------------------------------
 // Host-driven BFS perft
@@ -466,6 +600,11 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
     cudaMemcpy(d_rootPos, pos, sizeof(QuadBitBoard), cudaMemcpyHostToDevice);
     cudaMemcpy(d_rootState, gs, sizeof(GameState), cudaMemcpyHostToDevice);
 
+    // Copy root hash to GPU
+    Hash128 rootHash = computeHash(pos, gs, rootColor);
+    Hash128 *d_rootHash = alloc.alloc<Hash128>(1);
+    cudaMemcpy(d_rootHash, &rootHash, sizeof(Hash128), cudaMemcpyHostToDevice);
+
     // Generate root moves on CPU
     CMove rootMoves[MAX_MOVES];
     int rootMoveCount = generateMoves(pos, gs, rootColor, rootMoves);
@@ -491,6 +630,7 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
 
     QuadBitBoard *d_prevBoards = d_rootPos;
     GameState *d_prevStates = d_rootState;
+    Hash128 *d_prevHashes = d_rootHash;
     int currentCount = rootMoveCount;
 
     // Use fused 2-level leaf for depth >= 4: saves memory and improves locality.
@@ -502,26 +642,55 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
     // first makeMove uses rootColor, producing positions with !rootColor, etc.
     uint8 levelColor = rootColor;
 
+    // Per-level state saved for the upsweep
+    const int MAX_BFS_LEVELS = 20;
+    BFSLevelSave levelSaves[MAX_BFS_LEVELS];
+    int numLevels = 0;
+
     // BFS loop: depth-1 down to bfsMinLevel are intermediate levels
     for (int level = depth - 1; level >= bfsMinLevel; level--)
     {
-        // Allocate boards, states, and move counts
+        int remainingDepth = level;
+
+        // Allocate boards, states, hashes, move counts, TT hit counts
         QuadBitBoard *d_curBoards = alloc.alloc<QuadBitBoard>(currentCount);
         GameState *d_curStates = alloc.alloc<GameState>(currentCount);
+        Hash128 *d_curHashes = alloc.alloc<Hash128>(currentCount);
         int *d_moveCounts = alloc.alloc<int>(currentCount);
+        uint64 *d_ttHitCounts = nullptr;
+#if USE_TT
+        d_ttHitCounts = alloc.alloc<uint64>(currentCount);
+#endif
 
-        if (!d_curBoards || !d_curStates || !d_moveCounts)
+        if (!d_curBoards || !d_curStates || !d_curHashes || !d_moveCounts)
         {
             printf("\nOOM during BFS at level %d with %d positions\n", level, currentCount);
             return 0;
         }
 
-        // Step 1: make moves and count child moves
+        // Step 1: make moves, compute hashes, count child moves, probe TT
         int nBlocks = (currentCount - 1) / BLOCK_SIZE + 1;
+        TTTable curTT = {nullptr, 0};
+#if USE_TT
+        if (remainingDepth < MAX_TT_DEPTH)
+            curTT = deviceTTs[remainingDepth];
+#endif
         makemove_and_count_moves_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                                   d_prevHashes,
                                                                    d_indices, d_moves,
                                                                    d_curBoards, d_curStates,
-                                                                   d_moveCounts, currentCount, levelColor);
+                                                                   d_curHashes,
+                                                                   d_moveCounts, d_ttHitCounts,
+                                                                   curTT,
+                                                                   currentCount, levelColor);
+
+        // Save state for upsweep (before d_indices gets overwritten)
+        levelSaves[numLevels].indicesToParent = d_indices;
+        levelSaves[numLevels].hashes = d_curHashes;
+        levelSaves[numLevels].ttHitCounts = d_ttHitCounts;
+        levelSaves[numLevels].count = currentCount;
+        levelSaves[numLevels].remainingDepth = remainingDepth;
+        numLevels++;
 
         // After makeMove, positions are now at the flipped color
         levelColor = !levelColor;
@@ -543,7 +712,6 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
         if (!d_newIndices || !d_newMoves)
         {
             // Dynamic OOM fallback: use 2-level leaf from the boards we just created.
-            // This avoids allocating the huge move/index arrays for this level.
             if (level >= 2)
             {
                 int nBlk = (currentCount - 1) / BLOCK_SIZE + 1;
@@ -582,34 +750,110 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
         // Advance to next level
         d_prevBoards = d_curBoards;
         d_prevStates = d_curStates;
+        d_prevHashes = d_curHashes;
         d_indices = d_newIndices;
         d_moves = d_newMoves;
         currentCount = nextLevelCount;
     }
 
     // Final level: leaf kernel
+    uint64 *d_leafCounts = nullptr;
+#if USE_TT
+    d_leafCounts = alloc.alloc<uint64>(currentCount);
+#endif
+
+    // Determine leaf TT (for fused kernel, remaining depth = bfsMinLevel - 1)
+    TTTable leafTT = {nullptr, 0};
+#if USE_TT && HASH_IN_LEAF_KERNEL
+    int leafRemDepth = bfsMinLevel - 1;
+    if (leafRemDepth >= 2 && leafRemDepth < MAX_TT_DEPTH)
+        leafTT = deviceTTs[leafRemDepth];
+#endif
+
     {
         int nBlocks = (currentCount - 1) / BLOCK_SIZE + 1;
         if (use2LevelLeaf)
         {
-            // Fused 2-level leaf: each thread handles 2 levels (make move + generate + count all)
             fused_2level_leaf_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                               d_prevHashes,
                                                                d_indices, d_moves,
-                                                               d_perftCounter, currentCount, levelColor);
+                                                               d_perftCounter,
+                                                               d_leafCounts,
+                                                               leafTT,
+                                                               currentCount, levelColor);
         }
         else
         {
-            // Standard 1-level leaf: each thread handles 1 level (make move + count)
             makeMove_and_perft_leaf_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                                      d_prevHashes,
                                                                       d_indices, d_moves,
-                                                                      d_perftCounter, currentCount, levelColor);
+                                                                      d_perftCounter,
+                                                                      d_leafCounts,
+                                                                      currentCount, levelColor);
         }
         cudaDeviceSynchronize();
     }
 
-    // Read back result
     uint64 result = 0;
-    cudaMemcpy(&result, d_perftCounter, sizeof(uint64), cudaMemcpyDeviceToHost);
+
+#if USE_TT
+    // Upsweep: propagate per-position counts back through BFS levels and store in TT.
+    // The upsweep result is the authoritative total (includes TT hit counts from
+    // intermediate levels that the leaf kernel's global atomic counter misses).
+    if (numLevels > 0 && d_leafCounts)
+    {
+        uint64 *currentChildCounts = d_leafCounts;
+        int currentChildCount = currentCount;
+        int *currentChildIndices = d_indices;  // leaf indices
+
+        for (int lvl = numLevels - 1; lvl >= 0; lvl--)
+        {
+            int parentCount = levelSaves[lvl].count;
+
+            // Allocate parent counts (zeroed)
+            uint64 *d_parentCounts = alloc.alloc<uint64>(parentCount);
+            if (!d_parentCounts)
+            {
+                // OOM during upsweep — fall back to leaf-only counter
+                cudaMemcpy(&result, d_perftCounter, sizeof(uint64), cudaMemcpyDeviceToHost);
+                return result;
+            }
+            cudaMemset(d_parentCounts, 0, parentCount * sizeof(uint64));
+
+            // Reduce children into parents
+            int nBlk = (currentChildCount - 1) / BLOCK_SIZE + 1;
+            reduce_by_parent<<<nBlk, BLOCK_SIZE>>>(currentChildCounts, currentChildIndices,
+                                                    d_parentCounts, currentChildCount);
+
+            // Add TT hit counts and store in device TT
+            TTTable upsweepTT = {nullptr, 0};
+            int rd = levelSaves[lvl].remainingDepth;
+            if (rd >= 2 && rd < MAX_TT_DEPTH)
+                upsweepTT = deviceTTs[rd];
+
+            nBlk = (parentCount - 1) / BLOCK_SIZE + 1;
+            add_tt_hits_and_store<<<nBlk, BLOCK_SIZE>>>(d_parentCounts, levelSaves[lvl].ttHitCounts,
+                                                         levelSaves[lvl].hashes, upsweepTT, parentCount);
+
+            // Move up
+            currentChildCounts = d_parentCounts;
+            currentChildCount = parentCount;
+            currentChildIndices = levelSaves[lvl].indicesToParent;
+        }
+
+        // Sum the root children's counts = total perft result
+        cudaMemset(d_perftCounter, 0, sizeof(uint64));
+        int nBlk = (currentChildCount - 1) / BLOCK_SIZE + 1;
+        reduce_sum_uint64<<<nBlk, BLOCK_SIZE>>>(currentChildCounts, d_perftCounter, currentChildCount);
+        cudaDeviceSynchronize();
+        cudaMemcpy(&result, d_perftCounter, sizeof(uint64), cudaMemcpyDeviceToHost);
+    }
+    else
+#endif
+    {
+        // No upsweep: use leaf kernel's global atomic counter
+        cudaMemcpy(&result, d_perftCounter, sizeof(uint64), cudaMemcpyDeviceToHost);
+    }
 
     return result;
 }
@@ -781,4 +1025,11 @@ void MoveGeneratorBitboard::init()
         err = cudaMemcpyToSymbol(g_epTargetWhite, epWhite, sizeof(epWhite));
         if (err != S_OK) printf("For copying epTargetWhite, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
     }
+
+    // Initialize Zobrist random tables (CPU) and copy to GPU
+    initZobrist();
+    err = cudaMemcpyToSymbol(g_zobrist1, &zobrist1, sizeof(ZobristRandoms));
+    if (err != S_OK) printf("For copying zobrist1, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
+    err = cudaMemcpyToSymbol(g_zobrist2, &zobrist2, sizeof(ZobristRandoms));
+    if (err != S_OK) printf("For copying zobrist2, Err id: %d, str: %s\n", err, cudaGetErrorString(err));
 }

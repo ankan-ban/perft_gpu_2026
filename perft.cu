@@ -3,6 +3,7 @@
 #include "utils.h"
 #include "launcher.h"
 
+
 int main(int argc, char *argv[])
 {
     // Check for -cpu flag anywhere in args
@@ -66,11 +67,16 @@ int main(int argc, char *argv[])
         printf("CPU mode\n");
         fflush(stdout);
 
+        // CPU mode: all TTs are host-side, starting from depth 2
+        initTT(2, maxDepth);
+
         for (int depth = 1; depth <= maxDepth; depth++)
         {
             perftCPU(&testBB, &testGS, rootColor, depth);
             fflush(stdout);
         }
+
+        freeTT();
     }
     else
     {
@@ -94,11 +100,15 @@ int main(int argc, char *argv[])
         printf("Launch depth: %d\n", launchDepth);
         fflush(stdout);
 
+        initTT(launchDepth, maxDepth);
+
         for (int depth = 1; depth <= maxDepth; depth++)
         {
             perftLauncher(&testBB, &testGS, rootColor, depth, launchDepth);
             fflush(stdout);
         }
+
+        freeTT();
 
         cudaFree(preAllocatedBufferHost);
         cudaDeviceReset();

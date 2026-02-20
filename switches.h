@@ -22,9 +22,23 @@
 // single cache-line access instead of two separate loads
 #define USE_COMBINED_MAGIC_GPU 1
 
+// transposition table settings
+#define USE_TT 1                     // master switch for transposition tables
+#define HASH_IN_LEAF_KERNEL 1        // TT probe/store in fused 2-level leaf kernel
+#define DEVICE_TT_BUDGET_MB 2048     // GPU memory budget for device TTs (MB)
+#define HOST_TT_BUDGET_MB 2048       // pinned host memory budget for host TTs (MB)
+
 
 #ifdef __CUDACC__
 #define CUDA_CALLABLE_MEMBER __host__ __device__
 #else
 #define CUDA_CALLABLE_MEMBER
+#endif
+
+#ifndef CPU_FORCE_INLINE
+#ifdef __linux__
+    #define CPU_FORCE_INLINE inline
+#else
+    #define CPU_FORCE_INLINE __forceinline
+#endif
 #endif
