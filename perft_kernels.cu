@@ -649,6 +649,43 @@ uint64 perft_bb(QuadBitBoard *pos, GameState *gs, uint8 color, uint32 depth)
 
 
 // -------------------------------------------------------------------------
+// Template-optimized CPU perft (pure CPU path, no GPU)
+// -------------------------------------------------------------------------
+
+template <uint8 chance>
+static uint64 perft_cpu(QuadBitBoard *pos, GameState *gs, uint32 depth)
+{
+    if (depth == 1)
+    {
+        return MoveGeneratorBitboard::countMoves<chance>(pos, gs);
+    }
+
+    CMove moves[MAX_MOVES];
+    int nMoves = MoveGeneratorBitboard::generateMoves<chance>(pos, gs, moves);
+
+    uint64 count = 0;
+    for (int i = 0; i < nMoves; i++)
+    {
+        QuadBitBoard childPos = *pos;
+        GameState childGs = *gs;
+        MoveGeneratorBitboard::makeMove<chance>(&childPos, &childGs, moves[i]);
+        count += perft_cpu<!chance>(&childPos, &childGs, depth - 1);
+    }
+    return count;
+}
+
+uint64 perft_cpu_dispatch(QuadBitBoard *pos, GameState *gs, uint8 color, uint32 depth)
+{
+    if (depth == 0)
+        return 1;
+    if (color == WHITE)
+        return perft_cpu<WHITE>(pos, gs, depth);
+    else
+        return perft_cpu<BLACK>(pos, gs, depth);
+}
+
+
+// -------------------------------------------------------------------------
 // Move generator initialization
 // -------------------------------------------------------------------------
 

@@ -109,3 +109,20 @@ void perftLauncher(QuadBitBoard *pos, GameState *gs, uint8 rootColor, uint32 dep
     printf("\n");
     fflush(stdout);
 }
+
+void perftCPU(QuadBitBoard *pos, GameState *gs, uint8 rootColor, uint32 depth)
+{
+    Timer timer;
+    timer.start();
+
+    uint64 result = perft_cpu_dispatch(pos, gs, rootColor, depth);
+
+    timer.stop();
+    double seconds = timer.elapsed();
+
+    printf("\nPerft(%02d): %llu, time: %g seconds", depth, (unsigned long long)result, seconds);
+    if (seconds > 0)
+        printf(", nps: %llu", (unsigned long long)((double)result / seconds));
+    printf("\n");
+    fflush(stdout);
+}
