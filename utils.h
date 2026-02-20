@@ -180,36 +180,14 @@ public:
 };
 
 
-class EventTimer {
+class Timer {
 public:
-    EventTimer() : mStarted(false), mStopped(false) {
-        cudaEventCreate(&mStart);
-        cudaEventCreate(&mStop);
+    void start() { mStart = std::chrono::high_resolution_clock::now(); }
+    void stop()  { mStop  = std::chrono::high_resolution_clock::now(); }
+    double elapsed() const {
+        return std::chrono::duration<double>(mStop - mStart).count();
     }
-    ~EventTimer() {
-        cudaEventDestroy(mStart);
-        cudaEventDestroy(mStop);
-    }
-    void start(cudaStream_t s = 0) {
-        cudaEventRecord(mStart, s);
-        mStarted = true; mStopped = false;
-    }
-    void stop(cudaStream_t s = 0)  {
-        assert(mStarted);
-        cudaEventRecord(mStop, s);
-        mStarted = false; mStopped = true;
-    }
-    float elapsed() {
-        assert(mStopped);
-        if (!mStopped) return 0;
-        cudaEventSynchronize(mStop);
-        float elapsed = 0;
-        cudaEventElapsedTime(&elapsed, mStart, mStop);
-        return elapsed;
-    }
-
 private:
-    bool mStarted, mStopped;
-    cudaEvent_t mStart, mStop;
+    std::chrono::high_resolution_clock::time_point mStart, mStop;
 };
 

@@ -95,16 +95,17 @@ static uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, i
 
 void perftLauncher(QuadBitBoard *pos, GameState *gs, uint8 rootColor, uint32 depth, int launchDepth)
 {
-    EventTimer timer;
+    Timer timer;
     timer.start();
 
     uint64 result = perft_cpu_recurse(pos, gs, rootColor, depth, launchDepth, preAllocatedBufferHost, PREALLOCATED_MEMORY_SIZE);
 
     timer.stop();
+    double seconds = timer.elapsed();
 
-    printf("\nPerft(%02d): %llu, time: %g seconds", depth, (unsigned long long)result, timer.elapsed() / 1000.0);
-    if (timer.elapsed() > 0)
-        printf(", nps: %llu", (unsigned long long)((double)result / timer.elapsed() * 1000.0));
+    printf("\nPerft(%02d): %llu, time: %g seconds", depth, (unsigned long long)result, seconds);
+    if (seconds > 0)
+        printf(", nps: %llu", (unsigned long long)((double)result / seconds));
     printf("\n");
     fflush(stdout);
 }
