@@ -295,6 +295,18 @@ When asked to benchmark, follow this protocol:
 - Asymmetric offsets (northWest=+7, southWest=-9) are error-prone
 - Per-pawn loop is already efficient for generateMoves since it needs from/to pairs anyway
 
+### Upsweep TT store bug [OPEN — correctness issue at LD < auto]
+- The upsweep computes per-position perft values that sum correctly but are INDIVIDUALLY wrong at depth 4+
+- Same position (128-bit hash) gets different perft values across GPU BFS calls, monotonically increasing by ~10K
+- Mismatches always at depth 6, idx=0 (the highest BFS level)
+- All at the `add_tt_hits_and_store` step — NOT hash collision, NOT dedup, NOT random quality
+- Key finding: with TT probe OFF + store ON = no mismatches. With probe ON + store ON = mismatches
+- TT probes at lower depths cause higher-depth per-position values to change
+- Level totals always preserved (childSum + ttSum == lvlSum)
+- Reference-style restructuring (TT hits add to parent during downsweep) attempted but introduced new bugs
+- Next debugging step: track specific hash values (e.g., cdad2653e01cc738:b918af90f79b915b) and log every TT store for those hashes to find when the wrong value enters
+- Upsweep TT store currently DISABLED for correctness. Performance impact: ~4x slower than with store enabled
+
 ### Unfused bfsMinLevel=2 with TT+dedup [REJECTED — 52% regression startpos, OOM pos2]
 - Changed bfsMinLevel from 3 to 2 to get dedup at one more level
 - Replaces fused 2-level leaf with simple 1-level leaf
