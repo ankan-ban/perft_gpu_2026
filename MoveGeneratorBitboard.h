@@ -1896,16 +1896,14 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         }
 
         // update game state
-        gs->chance = !chance;
         gs->enPassent = 0;
 
 #ifdef __CUDA_ARCH__
         // Castle flag update via LUT: handles king moves, rook moves, and captures on rook squares
-        // in a single branchless sequence (2 loads + 1 OR + 2 AND-NOT into bitfields)
+        // in a single branchless AND-NOT (LUT bits [3:0] align with packed castle bits)
         {
             uint8 castleClear = __ldg(&g_castleClear[move.getFrom()]) | __ldg(&g_castleClear[move.getTo()]);
-            gs->whiteCastle &= ~castleClear;
-            gs->blackCastle &= ~(castleClear >> 2);
+            gs->raw &= ~castleClear;
         }
 #else
         // CPU path: original logic

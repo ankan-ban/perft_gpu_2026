@@ -8,23 +8,6 @@
 // preallocated GPU memory buffer (host-side pointer)
 void *preAllocatedBufferHost;
 
-// helper routines for CPU perft
-static uint32 countMoves(QuadBitBoard *pos, GameState *gs)
-{
-    uint32 nMoves;
-    int chance = gs->chance;
-
-    if (chance == BLACK)
-    {
-        nMoves = MoveGeneratorBitboard::countMoves<BLACK>(pos, gs);
-    }
-    else
-    {
-        nMoves = MoveGeneratorBitboard::countMoves<WHITE>(pos, gs);
-    }
-    return nMoves;
-}
-
 #define ALIGN_UP(addr, align)   (((addr) + (align) - 1) & (~((align) - 1)))
 #define MEM_ALIGNMENT 32    // 32-byte alignment needed for v4.u64 loads/stores
 
@@ -247,7 +230,7 @@ __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 __global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, GameState *parentStates,
                                                  int *indices, CMove *moves,
                                                  QuadBitBoard *outPositions, GameState *outStates,
-                                                 int *moveCounts, int nThreads)
+                                                 int *moveCounts, int nThreads, uint8 color)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -260,7 +243,6 @@ __global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, Game
         GameState gs = parentStates[parentIndex];
         CMove move = moves[index];
 
-        uint8 color = gs.chance;
         makeMove(&pos, &gs, move, color);
         nMoves = countMoves(&pos, &gs, !color);
 
@@ -278,7 +260,7 @@ __global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, Game
 #define SMEM_MOVES_CAPACITY (BLOCK_SIZE * 64)
 
 __global__ void generate_moves_kernel(QuadBitBoard *positions, GameState *states,
-                                       CMove *generatedMovesBase, int *inclPrefixSums, int nThreads)
+                                       CMove *generatedMovesBase, int *inclPrefixSums, int nThreads, uint8 color)
 {
     __shared__ CMove smemMoves[SMEM_MOVES_CAPACITY];
 
@@ -314,7 +296,7 @@ __global__ void generate_moves_kernel(QuadBitBoard *positions, GameState *states
         // Fast path: generate into shared memory, then coalesced copy to global
         if (index < nThreads && myMoveCount > 0)
         {
-            generateMoves(&pos, &gs, gs.chance, &smemMoves[localOffset]);
+            generateMoves(&pos, &gs, color, &smemMoves[localOffset]);
         }
         __syncthreads();
 
@@ -329,7 +311,7 @@ __global__ void generate_moves_kernel(QuadBitBoard *positions, GameState *states
         // Fallback for rare blocks with very many moves: direct scattered writes
         if (index < nThreads && myMoveCount > 0)
         {
-            generateMoves(&pos, &gs, gs.chance, &generatedMovesBase[blockGlobalStart + localOffset]);
+            generateMoves(&pos, &gs, color, &generatedMovesBase[blockGlobalStart + localOffset]);
         }
     }
 }
@@ -340,7 +322,7 @@ __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 #endif
 __global__ void makeMove_and_perft_leaf_kernel(QuadBitBoard *positions, GameState *states,
                                                 int *indices, CMove *moves,
-                                                uint64 *globalPerftCounter, int nThreads)
+                                                uint64 *globalPerftCounter, int nThreads, uint8 color)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -350,7 +332,6 @@ __global__ void makeMove_and_perft_leaf_kernel(QuadBitBoard *positions, GameStat
     uint32 boardIndex = indices[index];
     QuadBitBoard pos = loadQuadBB(&positions[boardIndex]);
     GameState gs = states[boardIndex];
-    int color = gs.chance;
 
     CMove move = moves[index];
 
@@ -377,7 +358,7 @@ __global__ void makeMove_and_perft_leaf_kernel(QuadBitBoard *positions, GameStat
 // move and counts grandchildren. Used as dynamic OOM fallback.
 // -------------------------------------------------------------------------
 __global__ void perft_2level_from_board_kernel(QuadBitBoard *boards, GameState *states,
-                                                uint64 *globalPerftCounter, int nThreads)
+                                                uint64 *globalPerftCounter, int nThreads, uint8 color)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -386,7 +367,6 @@ __global__ void perft_2level_from_board_kernel(QuadBitBoard *boards, GameState *
 
     QuadBitBoard pos = loadQuadBB(&boards[index]);
     GameState gs = states[index];
-    uint8 color = gs.chance;
 
     CMove childMoves[MAX_MOVES];
     int nChildMoves = generateMoves(&pos, &gs, color, childMoves);
@@ -420,7 +400,7 @@ __global__ void perft_2level_from_board_kernel(QuadBitBoard *boards, GameState *
 __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *states,
                                           int *indices, CMove *moves,
-                                          uint64 *globalPerftCounter, int nThreads)
+                                          uint64 *globalPerftCounter, int nThreads, uint8 color)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -431,7 +411,6 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
     uint32 boardIndex = indices[index];
     QuadBitBoard pos = loadQuadBB(&positions[boardIndex]);
     GameState gs = states[boardIndex];
-    uint8 color = gs.chance;
 
     CMove move = moves[index];
     makeMove(&pos, &gs, move, color);
@@ -439,7 +418,7 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
     // Generate all legal moves at level N-1 into local memory.
     // 218 moves covers the wrost case
     CMove childMoves[218];
-    uint8 childColor = gs.chance;  // after makeMove, chance is flipped
+    uint8 childColor = !color;  // after makeMove, chance is flipped
     int nChildMoves = generateMoves(&pos, &gs, childColor, childMoves);
 
     // For each child move: make it and count grandchildren
@@ -469,12 +448,12 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
 // -------------------------------------------------------------------------
 
 // Run perft on GPU for a single position using host-driven breadth-first search
-uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, int depth, void *gpuBuffer, size_t bufferSize)
+uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int depth, void *gpuBuffer, size_t bufferSize)
 {
     if (depth <= 0)
         return 1;
     if (depth == 1)
-        return countMoves(pos, gs);
+        return countMoves(pos, gs, rootColor);
 
     GpuBumpAllocator alloc(gpuBuffer, bufferSize);
 
@@ -492,7 +471,7 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, int depth, void *gpu
 
     // Generate root moves on CPU
     CMove rootMoves[MAX_MOVES];
-    int rootMoveCount = generateMoves(pos, gs, gs->chance, rootMoves);
+    int rootMoveCount = generateMoves(pos, gs, rootColor, rootMoves);
 
     if (rootMoveCount == 0)
         return 0;
@@ -522,6 +501,10 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, int depth, void *gpu
     bool use2LevelLeaf = (depth >= 4);
     int bfsMinLevel = use2LevelLeaf ? 3 : 2;
 
+    // Track color through BFS levels: root positions have rootColor,
+    // first makeMove uses rootColor, producing positions with !rootColor, etc.
+    uint8 levelColor = rootColor;
+
     // BFS loop: depth-1 down to bfsMinLevel are intermediate levels
     for (int level = depth - 1; level >= bfsMinLevel; level--)
     {
@@ -541,7 +524,10 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, int depth, void *gpu
         makemove_and_count_moves_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
                                                                    d_indices, d_moves,
                                                                    d_curBoards, d_curStates,
-                                                                   d_moveCounts, currentCount);
+                                                                   d_moveCounts, currentCount, levelColor);
+
+        // After makeMove, positions are now at the flipped color
+        levelColor = !levelColor;
 
         // Step 2: in-place inclusive prefix sum
         cub::DeviceScan::InclusiveSum(d_cubTemp, cubTempBytes, d_moveCounts, d_moveCounts, currentCount);
@@ -565,7 +551,7 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, int depth, void *gpu
             {
                 int nBlk = (currentCount - 1) / BLOCK_SIZE + 1;
                 perft_2level_from_board_kernel<<<nBlk, BLOCK_SIZE>>>(d_curBoards, d_curStates,
-                                                                      d_perftCounter, currentCount);
+                                                                      d_perftCounter, currentCount, levelColor);
                 cudaDeviceSynchronize();
                 uint64 result = 0;
                 cudaMemcpy(&result, d_perftCounter, sizeof(uint64), cudaMemcpyDeviceToHost);
@@ -593,8 +579,8 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, int depth, void *gpu
         mp_interval_expand_kernel<<<numExpandCTAs, BLOCK_SIZE>>>(d_newIndices, d_moveCounts,
                                                                    nextLevelCount, currentCount, d_partitions);
 
-        // Step 5: generate moves
-        generate_moves_kernel<<<nBlocks, BLOCK_SIZE>>>(d_curBoards, d_curStates, d_newMoves, d_moveCounts, currentCount);
+        // Step 5: generate moves (positions at this level have color = levelColor)
+        generate_moves_kernel<<<nBlocks, BLOCK_SIZE>>>(d_curBoards, d_curStates, d_newMoves, d_moveCounts, currentCount, levelColor);
 
         // Advance to next level
         d_prevBoards = d_curBoards;
@@ -612,14 +598,14 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, int depth, void *gpu
             // Fused 2-level leaf: each thread handles 2 levels (make move + generate + count all)
             fused_2level_leaf_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
                                                                d_indices, d_moves,
-                                                               d_perftCounter, currentCount);
+                                                               d_perftCounter, currentCount, levelColor);
         }
         else
         {
             // Standard 1-level leaf: each thread handles 1 level (make move + count)
             makeMove_and_perft_leaf_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
                                                                       d_indices, d_moves,
-                                                                      d_perftCounter, currentCount);
+                                                                      d_perftCounter, currentCount, levelColor);
         }
         cudaDeviceSynchronize();
     }
@@ -637,26 +623,26 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, int depth, void *gpu
 // -------------------------------------------------------------------------
 
 // A very simple CPU routine - only for estimating launch depth
-uint64 perft_bb(QuadBitBoard *pos, GameState *gs, uint32 depth)
+uint64 perft_bb(QuadBitBoard *pos, GameState *gs, uint8 color, uint32 depth)
 {
     if (depth == 1)
     {
-        return countMoves(pos, gs);
+        return countMoves(pos, gs, color);
     }
 
     CMove moves[MAX_MOVES];
-    int nMoves = generateMoves(pos, gs, gs->chance, moves);
+    int nMoves = generateMoves(pos, gs, color, moves);
 
     uint64 count = 0;
     for (int i = 0; i < nMoves; i++)
     {
         QuadBitBoard childPos = *pos;
         GameState childGs = *gs;
-        if (gs->chance == WHITE)
+        if (color == WHITE)
             MoveGeneratorBitboard::makeMove<WHITE>(&childPos, &childGs, moves[i]);
         else
             MoveGeneratorBitboard::makeMove<BLACK>(&childPos, &childGs, moves[i]);
-        count += perft_bb(&childPos, &childGs, depth - 1);
+        count += perft_bb(&childPos, &childGs, !color, depth - 1);
     }
     return count;
 }

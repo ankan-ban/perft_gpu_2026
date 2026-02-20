@@ -128,16 +128,20 @@ struct QuadBitBoard
 CT_ASSERT(sizeof(QuadBitBoard) == 32);
 
 // Game state stored separately for better coalescing
-// 4-byte layout: each field a full byte — eliminates bitfield shift/mask extraction
-// on the ALU-bottlenecked pipe. Doubles memory per GS but well within budget.
+// 1-byte packed layout: bits [1:0]=whiteCastle, [3:2]=blackCastle, [7:4]=enPassent
+// chance is removed — always passed as template param or function arg
 struct GameState
 {
-    uint8 whiteCastle;       // 0-3
-    uint8 blackCastle;       // 0-3
-    uint8 enPassent;         // file + 1 (0-8)
-    uint8 chance;            // 0=WHITE, 1=BLACK
+    union {
+        struct {
+            uint8 whiteCastle : 2;
+            uint8 blackCastle : 2;
+            uint8 enPassent   : 4;   // file + 1
+        };
+        uint8 raw;  // for bulk castle-clear LUT operation
+    };
 };
-CT_ASSERT(sizeof(GameState) == 4);
+CT_ASSERT(sizeof(GameState) == 1);
 
 // a more compact move structure (16 bit)
 // from http://chessprogramming.wikispaces.com/Encoding+Moves

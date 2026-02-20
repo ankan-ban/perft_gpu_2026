@@ -120,11 +120,9 @@ public:
             }
         }
 
-        pos088->chance = gs->chance;
-        pos088->blackCastle = gs->blackCastle;
         pos088->whiteCastle = gs->whiteCastle;
+        pos088->blackCastle = gs->blackCastle;
         pos088->enPassent = gs->enPassent;
-        // halfMoveCounter not stored in GameState (not used in perft)
         pos088->halfMoveCounter = 0;
     }
 

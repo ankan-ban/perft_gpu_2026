@@ -61,11 +61,9 @@ void Utils::board088ToQuadBB(QuadBitBoard *qbb, GameState *gs, BoardPosition *po
         }
     }
 
-    gs->chance = pos088->chance;
-    gs->blackCastle = pos088->blackCastle;
     gs->whiteCastle = pos088->whiteCastle;
+    gs->blackCastle = pos088->blackCastle;
     gs->enPassent = pos088->enPassent;
-    // halfMoveCounter not stored in GameState (not used in perft)
 }
 
 

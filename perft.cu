@@ -47,9 +47,10 @@ int main(int argc, char *argv[])
 
     QuadBitBoard testBB;
     GameState testGS;
+    uint8 rootColor = testBoard.chance;
     Utils::board088ToQuadBB(&testBB, &testGS, &testBoard);
 
-    uint32 launchDepth = estimateLaunchDepth(&testBB, &testGS);
+    uint32 launchDepth = estimateLaunchDepth(&testBB, &testGS, rootColor);
     launchDepth = min(launchDepth, (uint32)11);
 
     // for best performance without GPU hash
@@ -71,7 +72,7 @@ int main(int argc, char *argv[])
 
     for (int depth = 1; depth <= maxDepth; depth++)
     {
-        perftLauncher(&testBB, &testGS, depth, launchDepth);
+        perftLauncher(&testBB, &testGS, rootColor, depth, launchDepth);
         fflush(stdout);
     }
 
