@@ -150,6 +150,17 @@ void initTT(int launchDepth, int maxDepth)
 #endif
 }
 
+void clearDeviceTTs()
+{
+#if USE_TT
+    for (int d = 0; d < MAX_TT_DEPTH; d++)
+    {
+        if (deviceTTs[d].entries)
+            cudaMemset(deviceTTs[d].entries, 0, (deviceTTs[d].mask + 1) * sizeof(TTEntry));
+    }
+#endif
+}
+
 void freeTT()
 {
 #if USE_TT

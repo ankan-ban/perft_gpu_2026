@@ -445,41 +445,54 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
 // Uses a hash table of packed (hashHi_32 | index) entries.
 // Duplicates get moveCounts=0 and a redirect to the original position.
 // -------------------------------------------------------------------------
-// Write position's packed entry (upper 32 bits of hash.hi | 1-indexed position) to dedup table.
-// Uses 1-indexed positions so that 0 = empty (distinguishes from valid entries).
-__global__ void write_dedup_table(Hash128 *hashes, uint64 *dedupTable, uint64 dedupMask, int n)
+// Dedup table entry: 16 bytes, stored/loaded atomically via v2.u64 PTX.
+// Uses full 64-bit hash.hi for verification (32 bits was insufficient —
+// caused false positives that wrote wrong values to device TTs via upsweep).
+struct DedupEntry
+{
+    uint64 hashHi;   // full 64-bit hash.hi for verification
+    uint64 index1;   // 1-indexed position (0 = empty)
+};
+CT_ASSERT(sizeof(DedupEntry) == 16);
+
+// Write position's entry to dedup table using 128-bit atomic store.
+__global__ void write_dedup_table(Hash128 *hashes, DedupEntry *dedupTable, uint64 dedupMask, int n)
 {
     uint32 idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     Hash128 h = hashes[idx];
     uint64 slot = h.lo & dedupMask;
-    uint64 packed = (h.hi & 0xFFFFFFFF00000000ULL) | (uint64)(idx + 1);  // 1-indexed
-    dedupTable[slot] = packed;
+    DedupEntry *ptr = &dedupTable[slot];
+    uint64 hi = h.hi;
+    uint64 idx1 = (uint64)(idx + 1);
+    asm volatile("st.global.v2.u64 [%0], {%1,%2};" :: "l"(ptr), "l"(hi), "l"(idx1));
 }
 
-// Check each position against the dedup table. If hash matches but index differs,
-// mark as duplicate: moveCounts=0, redirect stores the original's index.
-__global__ void check_duplicates(Hash128 *hashes, uint64 *dedupTable, uint64 dedupMask,
+// Check each position against the dedup table using full 64-bit hash.hi verification.
+// Uses 128-bit atomic load to read both fields consistently.
+__global__ void check_duplicates(Hash128 *hashes, DedupEntry *dedupTable, uint64 dedupMask,
                                   int *moveCounts, uint64 *ttHitCounts, int *redirects, int n)
 {
     uint32 idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     Hash128 h = hashes[idx];
     uint64 slot = h.lo & dedupMask;
-    uint64 entry = dedupTable[slot];
 
-    if (entry != 0)  // skip empty slots
+    // 128-bit atomic load
+    uint64 storedHi, storedIdx1;
+    const DedupEntry *ptr = &dedupTable[slot];
+    asm volatile("ld.global.v2.u64 {%0,%1}, [%2];" : "=l"(storedHi), "=l"(storedIdx1) : "l"(ptr));
+
+    if (storedIdx1 != 0)  // skip empty slots
     {
-        uint32 storedHi32 = (uint32)(entry >> 32);
-        uint32 storedIdx  = (uint32)(entry & 0xFFFFFFFF) - 1;  // back to 0-indexed
-        uint32 myHi32 = (uint32)(h.hi >> 32);
+        uint32 origIdx = (uint32)(storedIdx1 - 1);  // back to 0-indexed
 
-        if (storedHi32 == myHi32 && storedIdx != idx)
+        if (storedHi == h.hi && origIdx != idx)
         {
             // Duplicate detected — skip expansion, redirect to original
             moveCounts[idx] = 0;
             if (ttHitCounts) ttHitCounts[idx] = 0;
-            redirects[idx] = (int)storedIdx;
+            redirects[idx] = (int)origIdx;
             return;
         }
     }
@@ -516,8 +529,9 @@ __global__ void add_tt_hits_and_store(uint64 *positionCounts, uint64 *ttHitCount
     if (idx >= numPositions) return;
     uint64 totalCount = positionCounts[idx] + ttHitCounts[idx];
     positionCounts[idx] = totalCount;
-    // Disable upsweep TT store — causes correctness issues at low launch depths
-    // TODO: investigate root cause (32-bit dedup verification? TT collision?)
+    // Upsweep TT store disabled — per-position values at depth 4+ are individually
+    // wrong (though totals are correct), corrupting future GPU BFS calls via TT probe.
+    // Root cause under investigation. See CLAUDE.md for debugging notes.
     // if (!redirects || redirects[idx] < 0)
     //     ttStore(tt, posHashes[idx], totalCount);
 }
@@ -622,7 +636,8 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
         int nBlocks = (currentCount - 1) / BLOCK_SIZE + 1;
         TTTable curTT = {nullptr, 0};
 #if USE_TT
-        if (remainingDepth < MAX_TT_DEPTH)
+        // DEBUG: only probe device TT for depths 3-4 (skip 5-6)
+        if (remainingDepth >= 3 && remainingDepth < MAX_TT_DEPTH)
             curTT = deviceTTs[remainingDepth];
 #endif
         makemove_and_count_moves_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
@@ -633,6 +648,7 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
                                                                    d_moveCounts, d_ttHitCounts,
                                                                    curTT,
                                                                    currentCount, levelColor);
+
         // BFS-level dedup: detect identical positions and skip expanding duplicates
         int *d_redirects = nullptr;
 #if USE_TT
@@ -641,12 +657,12 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
             // Dedup table: 2× position count, rounded up to power of 2
             uint64 dedupSize = 1;
             while (dedupSize < (uint64)currentCount * 2) dedupSize <<= 1;
-            uint64 *d_dedupTable = alloc.alloc<uint64>(dedupSize);
+            DedupEntry *d_dedupTable = alloc.alloc<DedupEntry>(dedupSize);
             d_redirects = alloc.alloc<int>(currentCount);
 
             if (d_dedupTable && d_redirects)
             {
-                cudaMemset(d_dedupTable, 0, dedupSize * sizeof(uint64));  // 0 = empty
+                cudaMemset(d_dedupTable, 0, dedupSize * sizeof(DedupEntry));  // 0 = empty
                 uint64 dedupMask = dedupSize - 1;
 
                 write_dedup_table<<<nBlocks, BLOCK_SIZE>>>(d_curHashes, d_dedupTable, dedupMask, currentCount);
@@ -790,6 +806,43 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
                                                          levelSaves[lvl].hashes, upsweepTT,
                                                          levelSaves[lvl].redirects, parentCount,
                                                          rd);
+            // DEBUG: level sum verification (disabled — passed, no mismatches)
+            #if 0
+            {
+                uint64 *d_lvlSum = alloc.alloc<uint64>(1);
+                cudaMemset(d_lvlSum, 0, sizeof(uint64));
+                int nb = (parentCount - 1) / BLOCK_SIZE + 1;
+                reduce_sum_uint64<<<nb, BLOCK_SIZE>>>(d_parentCounts, d_lvlSum, parentCount);
+
+                uint64 *d_childSum = alloc.alloc<uint64>(1);
+                cudaMemset(d_childSum, 0, sizeof(uint64));
+                nb = (currentChildCount - 1) / BLOCK_SIZE + 1;
+                reduce_sum_uint64<<<nb, BLOCK_SIZE>>>(currentChildCounts, d_childSum, currentChildCount);
+
+                uint64 *d_ttSum = alloc.alloc<uint64>(1);
+                cudaMemset(d_ttSum, 0, sizeof(uint64));
+                nb = (parentCount - 1) / BLOCK_SIZE + 1;
+                reduce_sum_uint64<<<nb, BLOCK_SIZE>>>(levelSaves[lvl].ttHitCounts, d_ttSum, parentCount);
+
+                cudaDeviceSynchronize();
+                uint64 lvlSum, childSum, ttSum;
+                cudaMemcpy(&lvlSum, d_lvlSum, sizeof(uint64), cudaMemcpyDeviceToHost);
+                cudaMemcpy(&childSum, d_childSum, sizeof(uint64), cudaMemcpyDeviceToHost);
+                cudaMemcpy(&ttSum, d_ttSum, sizeof(uint64), cudaMemcpyDeviceToHost);
+
+                static int dbgCount = 0;
+                if (dbgCount < 20 && depth == 7 && lvlSum != childSum + ttSum)
+                {
+                    dbgCount++;
+                    printf("  LEVEL SUM MISMATCH rd=%d: parentSum=%llu childSum=%llu ttSum=%llu expected=%llu diff=%lld\n",
+                           rd, (unsigned long long)lvlSum, (unsigned long long)childSum,
+                           (unsigned long long)ttSum, (unsigned long long)(childSum + ttSum),
+                           (long long)(lvlSum - childSum - ttSum));
+                }
+            }
+
+            #endif
+
             // Apply dedup redirects: copy original's count to duplicates
             if (levelSaves[lvl].redirects)
             {

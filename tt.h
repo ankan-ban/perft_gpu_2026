@@ -46,7 +46,10 @@ __device__ __forceinline__ bool ttProbe(const TTTable &tt, Hash128 hash, uint64 
         : "=l"(storedVerif), "=l"(storedCount)
         : "l"(ptr));
 
-    if ((storedVerif ^ storedCount) == hash.hi)
+    // Match the reference's lockless scheme: XOR both hash parts with count.
+    // verification = (hash.hi ^ hash.lo) ^ count. Probe checks against (hash.hi ^ hash.lo).
+    uint64 expectedKey = hash.hi ^ hash.lo;
+    if ((storedVerif ^ storedCount) == expectedKey)
     {
         *outCount = storedCount;
         return true;
@@ -59,8 +62,8 @@ __device__ __forceinline__ void ttStore(const TTTable &tt, Hash128 hash, uint64 
     if (!tt.entries) return;
     uint64 idx = hash.lo & tt.mask;
 
-    // 128-bit atomic store via PTX to write both fields consistently
-    uint64 verification = hash.hi ^ count;
+    // Match reference: XOR both hash.hi and hash.lo into verification
+    uint64 verification = (hash.hi ^ hash.lo) ^ count;
     TTEntry *ptr = &tt.entries[idx];
     asm volatile("st.global.v2.u64 [%0], {%1,%2};"
         :: "l"(ptr), "l"(verification), "l"(count));
@@ -78,7 +81,8 @@ inline bool ttProbeHost(const TTTable &tt, Hash128 hash, uint64 *outCount)
     uint64 idx = hash.lo & tt.mask;
     uint64 storedCount = tt.entries[idx].count;
     uint64 storedVerif = tt.entries[idx].verification;
-    if ((storedVerif ^ storedCount) == hash.hi)
+    uint64 expectedKey = hash.hi ^ hash.lo;
+    if ((storedVerif ^ storedCount) == expectedKey)
     {
         *outCount = storedCount;
         return true;
@@ -91,7 +95,7 @@ inline void ttStoreHost(const TTTable &tt, Hash128 hash, uint64 count)
     if (!tt.entries) return;
     uint64 idx = hash.lo & tt.mask;
     tt.entries[idx].count = count;
-    tt.entries[idx].verification = hash.hi ^ count;
+    tt.entries[idx].verification = (hash.hi ^ hash.lo) ^ count;
 }
 
 // -------------------------------------------------------------------------

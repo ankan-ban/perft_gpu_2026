@@ -22,4 +22,5 @@ uint64 perft_cpu_dispatch(QuadBitBoard *pos, GameState *gs, uint8 color, uint32 
 
 // Transposition table management
 void initTT(int launchDepth, int maxDepth);
+void clearDeviceTTs();
 void freeTT();
