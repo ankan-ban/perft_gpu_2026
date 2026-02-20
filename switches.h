@@ -24,7 +24,7 @@
 
 // transposition table settings
 #define USE_TT 1                     // master switch for transposition tables
-#define HASH_IN_LEAF_KERNEL 1        // TT probe/store in fused 2-level leaf kernel
+#define HASH_IN_LEAF_KERNEL 0        // TT probe/store in fused 2-level leaf kernel
 #define DEVICE_TT_BUDGET_MB 2048     // GPU memory budget for device TTs (MB)
 #define HOST_TT_BUDGET_MB 2048       // pinned host memory budget for host TTs (MB)
 
