@@ -619,37 +619,7 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
 
 
 // -------------------------------------------------------------------------
-// CPU perft (for depth estimation)
-// -------------------------------------------------------------------------
-
-// A very simple CPU routine - only for estimating launch depth
-uint64 perft_bb(QuadBitBoard *pos, GameState *gs, uint8 color, uint32 depth)
-{
-    if (depth == 1)
-    {
-        return countMoves(pos, gs, color);
-    }
-
-    CMove moves[MAX_MOVES];
-    int nMoves = generateMoves(pos, gs, color, moves);
-
-    uint64 count = 0;
-    for (int i = 0; i < nMoves; i++)
-    {
-        QuadBitBoard childPos = *pos;
-        GameState childGs = *gs;
-        if (color == WHITE)
-            MoveGeneratorBitboard::makeMove<WHITE>(&childPos, &childGs, moves[i]);
-        else
-            MoveGeneratorBitboard::makeMove<BLACK>(&childPos, &childGs, moves[i]);
-        count += perft_bb(&childPos, &childGs, !color, depth - 1);
-    }
-    return count;
-}
-
-
-// -------------------------------------------------------------------------
-// Template-optimized CPU perft (pure CPU path, no GPU)
+// Template-optimized CPU perft
 // -------------------------------------------------------------------------
 
 template <uint8 chance>

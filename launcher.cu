@@ -35,9 +35,9 @@ void initGPU(int gpu)
 uint32 estimateLaunchDepth(QuadBitBoard *pos, GameState *gs, uint8 rootColor)
 {
     // estimate branching factor near the root
-    double perft1 = (double)perft_bb(pos, gs, rootColor, 1);
-    double perft2 = (double)perft_bb(pos, gs, rootColor, 2);
-    double perft3 = (double)perft_bb(pos, gs, rootColor, 3);
+    double perft1 = (double)perft_cpu_dispatch(pos, gs, rootColor, 1);
+    double perft2 = (double)perft_cpu_dispatch(pos, gs, rootColor, 2);
+    double perft3 = (double)perft_cpu_dispatch(pos, gs, rootColor, 3);
 
     // this works well when the root position has very low branching factor (e.g, in case king is in check)
     float geoMean = sqrt((perft3 / perft2) * (perft2 / perft1));
