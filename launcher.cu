@@ -119,27 +119,30 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFa
                    (unsigned long long)(budgetBytes / (1024*1024)),
                    (unsigned long long)(freeMem / (1024*1024)));
         }
+
         uint64 perTableBytes = budgetBytes / numDeviceTTs;
         uint64 entriesPerTable = floorPow2(perTableBytes / sizeof(TTEntry));
         if (entriesPerTable < 1024) entriesPerTable = 1024;
 
         for (int d = 3; d < maxLaunchDepth && d < MAX_TT_DEPTH; d++)
         {
-            cudaError_t err = cudaMalloc(&deviceTTs[d].entries, entriesPerTable * sizeof(TTEntry));
+            uint64 entries = (d == 4) ? entriesPerTable * 2 : entriesPerTable;
+
+            cudaError_t err = cudaMalloc(&deviceTTs[d].entries, entries * sizeof(TTEntry));
             if (err != cudaSuccess)
             {
                 printf("Warning: failed to allocate device TT[%d] (%llu MB): %s\n",
-                       d, (unsigned long long)(entriesPerTable * sizeof(TTEntry) / (1024*1024)),
+                       d, (unsigned long long)(entries * sizeof(TTEntry) / (1024*1024)),
                        cudaGetErrorString(err));
                 deviceTTs[d].entries = nullptr;
                 deviceTTs[d].mask = 0;
                 continue;
             }
-            cudaMemset(deviceTTs[d].entries, 0, entriesPerTable * sizeof(TTEntry));
-            deviceTTs[d].mask = entriesPerTable - 1;
+            cudaMemset(deviceTTs[d].entries, 0, entries * sizeof(TTEntry));
+            deviceTTs[d].mask = entries - 1;
             printf("Device TT[%d]: %lluM entries (%llu MB)\n", d,
-                   (unsigned long long)(entriesPerTable / (1024*1024)),
-                   (unsigned long long)(entriesPerTable * sizeof(TTEntry) / (1024*1024)));
+                   (unsigned long long)(entries / (1024*1024)),
+                   (unsigned long long)(entries * sizeof(TTEntry) / (1024*1024)));
         }
     }
 
