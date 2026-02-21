@@ -13,10 +13,11 @@
   - **OOM fallback fix**: all BFS OOM paths signal g_lastBfsOom, caller falls back to CPU recursion
   - **Mid-iteration LD decrease**: g_effectiveLD drops on first OOM, prevents cascading corruption
   - **Dynamic LD increase DISABLED**: root perft(N) memory doesn't predict worst-case perft(N+1)
-  - **Device TTs**: allocated for depths 3 through LD-1 only (5 TTs at 512M each for LD=8)
+  - **Device TTs**: allocated for depths 3 through LD-1 (TT[4] at 1024M, others at 512M for LD=8)
+  - **All host TTs lossless**: LosslessTT at all CPU depths, proportional sizing by branchingFactor^(maxDepth-d), 4M entry floor
   - **VERBOSE_LOGGING switch** (switches.h, off by default): call size/time histograms, per-BFS-level stats, progress reporting
   - **WIP**: moving ALL logging behind VERBOSE_LOGGING — basic call stats + TT stats still print when off. Need to finish wrapping them. Code does NOT currently build cleanly with VERBOSE_LOGGING=0 due to partially-complete refactor.
-  - **Baseline at LD=8**: perft 10 = 3.58s, 19,398B nps | perft 11 = 45.1s, 46,464B nps | perft 12 = 662s, 94,896B nps
+  - **Baseline at LD=8**: perft 10 = 3.55s, 19,554B nps | perft 11 = 43.5s, 48,204B nps | perft 12 = 618s, 101,767B nps | perft 13 = 9503s, 208,476B nps
 - **`async-streams`** (WIP side branch, branched from transposition-tables):
   - All of the above PLUS CUDA streams + background thread for GPU BFS overlap
   - 2 streams, split buffer (8GB each), pinned readback memory, stream-local sync
@@ -55,10 +56,11 @@
 - `Magics.cpp` — magic number discovery routines
 
 ## Performance
-- RTX 6000 Pro Blackwell (with TT, LD=8, after OOM fix):
-  - Startpos perft 9: 0.31s | perft 10: 3.58s, 19,398B nps
-  - perft 11: 45.1s, 46,464B nps | perft 12: 662s, 94,896B nps
-  - GPU at 580-605W, 88-90°C, 93-100% util throughout perft 12 (confirmed via nvidia-smi)
+- RTX 6000 Pro Blackwell (with TT, LD=8, lossless host TTs + TT[4] 2x):
+  - Startpos perft 9: 0.29s | perft 10: 3.55s, 19,554B nps
+  - perft 11: 43.5s, 48,204B nps | perft 12: 618s, 101,767B nps
+  - perft 13: 9503s (2h 38m), 208,476B nps
+  - GPU at 590-600W, 88-89°C, 93-97% util throughout perft 13 (confirmed via nvidia-smi)
 - RTX 6000 Pro Blackwell (no TT baseline): Startpos perft 9 ~1027B nps (2.38s)
 - RTX 4090: Startpos perft 9 ~729B nps (3.34s), Position 2 perft 7 ~1103B nps (0.34s)
 
@@ -70,7 +72,7 @@ For TT performance benchmarking, only test **startpos perft 10 and perft 11** �
 ```
 - **Run benchmarks SERIALLY** — never run multiple GPU benchmarks in parallel (corrupts measurements)
 - Always do a clean rebuild (`--clean-first`) before benchmarking if any code changed
-- Baseline (LD=8, after OOM fix): perft 10 ~19,398B nps (3.58s), perft 11 ~46,464B nps (45.1s), perft 12 ~94,896B nps (662s)
+- Baseline (LD=8, lossless host TTs + TT[4] 2x): perft 10 ~19,554B nps (3.55s), perft 11 ~48,204B nps (43.5s), perft 12 ~101,767B nps (618s)
 
 ## OOM Handling (FIXED)
 
@@ -218,13 +220,14 @@ Critical for TT sizing — unique positions grow ~9-10x per ply vs ~28-30x for t
 | 10 | 85,375,278,064 | 69,352,859,712,417 | 812x |
 | 11 | 726,155,461,002 | 2,097,651,003,696,806 | 2,889x |
 
-### GPU BFS Call Scaling (startpos, LD=8, after OOM fix)
+### GPU BFS Call Scaling (startpos, LD=8, lossless host TTs + TT[4] 2x)
 | Perft | GPU Calls | Avg ms | Max ms | Host TT Hit% | Total Time |
 |-------|-----------|--------|--------|--------------|------------|
-| 9 | 20 | 15.3 | 25.4 | 0% | 0.31s |
-| 10 | 400 | 8.9 | 26.4 | 0% | 3.58s |
-| 11 | 7,602 | 5.9 | 56.4 | 13.9% | 45.1s |
-| 12 | 101,239 | 6.5 | 164.0 | 38.5% | 662s |
+| 9 | 20 | 15.3 | 25.4 | 0% | 0.29s |
+| 10 | 400 | 8.9 | 26.4 | 0% | 3.55s |
+| 11 | 7,602 | 5.9 | 56.4 | 13.9% | 43.5s |
+| 12 | 101,239 | 6.5 | 164.0 | 38.5% | 618s |
+| 13 | ~1.3M | ~6.5 | — | ~50%+ | 9,503s |
 - GPU calls track OEIS unique positions at abs depth N-8 (remaining depth = LD)
 - ~29% of perft 12 calls have 0 leaf positions (all device TT hits, ~0.17ms each)
 

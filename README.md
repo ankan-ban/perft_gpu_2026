@@ -6,7 +6,19 @@ This is a heavily optimized rewrite of the [original perft_gpu](https://github.c
 
 ## Performance
 
-Measured on a single NVIDIA RTX 4090 GPU:
+### NVIDIA RTX 6000 Pro (Blackwell, 96GB VRAM)
+
+With transposition tables enabled, lossless host TTs, launch depth 8:
+
+| Position | Depth | Nodes | Time | Speed |
+|---|---|---|---|---|
+| Starting position | 9 | 2,439,530,234,167 | 0.29s | ~8,308 billion nps |
+| Starting position | 10 | 69,352,859,712,417 | 3.55s | ~19,554 billion nps |
+| Starting position | 11 | 2,097,651,003,696,806 | 43.5s | ~48,204 billion nps |
+| Starting position | 12 | 62,854,969,236,701,747 | 618s | ~101,767 billion nps |
+| Starting position | 13 | 1,981,066,775,000,396,239 | 9,503s | ~208,476 billion nps |
+
+### NVIDIA RTX 4090 (no transposition tables)
 
 | Position | Depth | Nodes | Time | Speed |
 |---|---|---|---|---|
