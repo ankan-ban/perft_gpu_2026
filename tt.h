@@ -99,6 +99,67 @@ inline void ttStoreHost(const TTTable &tt, Hash128 hash, uint64 count)
 }
 
 // -------------------------------------------------------------------------
+// Lossless chained hash table for host CPU (launch depth).
+// No entry is ever evicted — guarantees every GPU BFS result is reusable.
+// Chain entries are allocated from a flat pool (bump allocator).
+// Thread-safe store via InterlockedIncrement + CAS for chain prepend.
+// -------------------------------------------------------------------------
+
+struct LosslessEntry
+{
+    uint64 hashKey;     // hash.hi ^ hash.lo for verification
+    uint64 count;       // perft value
+    int32_t next;       // next entry index (-1 = end of chain)
+    int32_t _pad;
+};
+
+CT_ASSERT(sizeof(LosslessEntry) == 24);
+
+struct LosslessTT
+{
+    int32_t *buckets;           // bucket heads (-1 = empty)
+    LosslessEntry *pool;        // entry pool
+    uint64 bucketMask;          // numBuckets - 1
+    int32_t nextFree;           // next free entry
+    int32_t poolCapacity;       // max entries in pool
+};
+
+inline bool losslessProbe(const LosslessTT &tt, Hash128 hash, uint64 *outCount)
+{
+    if (!tt.buckets) return false;
+    uint64 bucket = hash.lo & tt.bucketMask;
+    uint64 key = hash.hi ^ hash.lo;
+    int32_t idx = tt.buckets[bucket];
+    while (idx >= 0)
+    {
+        if (tt.pool[idx].hashKey == key)
+        {
+            *outCount = tt.pool[idx].count;
+            return true;
+        }
+        idx = tt.pool[idx].next;
+    }
+    return false;
+}
+
+inline void losslessStore(LosslessTT &tt, Hash128 hash, uint64 count)
+{
+    if (!tt.buckets) return;
+    // Atomic bump allocator — safe for concurrent stores from multiple threads
+    long newIdx = _InterlockedIncrement((volatile long *)&tt.nextFree) - 1;
+    if (newIdx >= tt.poolCapacity) return;
+    uint64 bucket = hash.lo & tt.bucketMask;
+    tt.pool[newIdx].hashKey = hash.hi ^ hash.lo;
+    tt.pool[newIdx].count = count;
+    // CAS loop to prepend to bucket chain
+    long oldHead;
+    do {
+        oldHead = *(volatile long *)&tt.buckets[bucket];
+        tt.pool[newIdx].next = (int32_t)oldHead;
+    } while (_InterlockedCompareExchange((volatile long *)&tt.buckets[bucket], (long)newIdx, oldHead) != oldHead);
+}
+
+// -------------------------------------------------------------------------
 // TT management (allocation, deallocation)
 // -------------------------------------------------------------------------
 
@@ -107,9 +168,10 @@ inline void ttStoreHost(const TTTable &tt, Hash128 hash, uint64 count)
 // Global TT arrays (defined in launcher.cu)
 extern TTTable deviceTTs[MAX_TT_DEPTH];   // GPU memory, indexed by remaining depth
 extern TTTable hostTTs[MAX_TT_DEPTH];     // pinned host memory, indexed by remaining depth
+extern LosslessTT hostLosslessTT;         // lossless chained table for launch depth
 
 // Initialize TTs based on launch depth and max depth
-void initTT(int launchDepth, int maxDepth);
+void initTT(int launchDepth, int maxLaunchDepth, int maxDepth);
 
 // Free all TT memory
 void freeTT();

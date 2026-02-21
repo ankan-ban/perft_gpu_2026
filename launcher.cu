@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
+#include <chrono>
 #include "MoveGeneratorBitboard.h"
 #include "launcher.h"
 #include "utils.h"
@@ -14,6 +15,33 @@ void *preAllocatedBufferHost;
 // Global TT arrays
 TTTable deviceTTs[MAX_TT_DEPTH];
 TTTable hostTTs[MAX_TT_DEPTH];
+LosslessTT hostLosslessTT;
+int g_losslessDepth = -1;  // depth using lossless TT (-1 = none)
+
+static uint64 g_oomFallbackCount = 0;
+#if VERBOSE_LOGGING
+// GPU BFS call tracking (reset per depth iteration)
+static uint64 g_gpuCallCount = 0;
+static double g_gpuCallTotalTime = 0.0;
+static double g_gpuCallMinTime = 1e30;
+static double g_gpuCallMaxTime = 0.0;
+static uint64 g_hostTTHits = 0;
+static uint64 g_hostTTMisses = 0;
+static size_t g_iterPeakBfsMemory = 0;
+#endif
+#if VERBOSE_LOGGING
+// GPU call diagnostics (histograms, per-BFS-level stats, progress)
+static uint64 g_callSizeHist[7] = {0};      // by leaf count: 0, 1-100, 101-1K, 1K-10K, 10K-100K, 100K-1M, 1M+
+static uint64 g_callSizeLeafSum[7] = {0};   // total leaf positions per size bucket
+static double g_callSizeTimeSum[7] = {0};   // total time per size bucket
+static uint64 g_callTimeHist[6] = {0};      // by duration: <0.01ms, 0.01-0.1ms, 0.1-1ms, 1-10ms, 10-100ms, 100ms+
+static double g_callTimeTimeSum[6] = {0};   // total time per time bucket
+static uint64 g_bfsLevelPositionSum[20] = {0};  // sum of positions at each BFS level across all calls
+static uint64 g_bfsLevelCallCount[20] = {0};    // number of calls that had each BFS level
+static uint64 g_totalLeafPositions = 0;
+static std::chrono::steady_clock::time_point g_iterStartWallTime;
+static double g_lastProgressWallTime = 0;
+#endif
 
 void initGPU(int gpu)
 {
@@ -62,17 +90,18 @@ static uint64 floorPow2(uint64 n)
 int g_deviceTTBudgetMB = DEVICE_TT_BUDGET_MB;
 int g_hostTTBudgetMB = HOST_TT_BUDGET_MB;
 
-void initTT(int launchDepth, int maxDepth)
+void initTT(int launchDepth, int maxLaunchDepth, int maxDepth)
 {
 #if USE_TT
     memset(deviceTTs, 0, sizeof(deviceTTs));
     memset(hostTTs, 0, sizeof(hostTTs));
 
-    // Device TTs: depths 3 through launchDepth-1 (GPU BFS levels)
+    // Device TTs: depths 3 through maxLaunchDepth-1 (GPU BFS levels)
+    // Allocate for the widest possible LD range to support dynamic LD increase.
     // Depth 2 is unused: bfsMinLevel=3 means no BFS level probes TT[2],
     // and HASH_IN_LEAF_KERNEL=0 means the fused leaf doesn't probe it either.
     int numDeviceTTs = 0;
-    for (int d = 3; d < launchDepth && d < MAX_TT_DEPTH; d++)
+    for (int d = 3; d < maxLaunchDepth && d < MAX_TT_DEPTH; d++)
         numDeviceTTs++;
 
     if (numDeviceTTs > 0)
@@ -96,7 +125,7 @@ void initTT(int launchDepth, int maxDepth)
         uint64 entriesPerTable = floorPow2(perTableBytes / sizeof(TTEntry));
         if (entriesPerTable < 1024) entriesPerTable = 1024;
 
-        for (int d = 3; d < launchDepth && d < MAX_TT_DEPTH; d++)
+        for (int d = 3; d < maxLaunchDepth && d < MAX_TT_DEPTH; d++)
         {
             cudaError_t err = cudaMalloc(&deviceTTs[d].entries, entriesPerTable * sizeof(TTEntry));
             if (err != cudaSuccess)
@@ -117,6 +146,11 @@ void initTT(int launchDepth, int maxDepth)
     }
 
     // Host TTs: depths launchDepth through maxDepth (CPU levels)
+    // Launch depth gets a lossless chained table (no evictions).
+    // Other depths get regular lossy tables.
+    memset(&hostLosslessTT, 0, sizeof(hostLosslessTT));
+    g_losslessDepth = -1;
+
     int numHostTTs = 0;
     for (int d = launchDepth; d <= maxDepth && d < MAX_TT_DEPTH; d++)
         numHostTTs++;
@@ -125,11 +159,47 @@ void initTT(int launchDepth, int maxDepth)
     {
         uint64 budgetBytes = (uint64)g_hostTTBudgetMB * 1024 * 1024;
         uint64 perTableBytes = budgetBytes / numHostTTs;
+
+        // Lossless chained table at launch depth
+        // Split its budget: 25% buckets, 75% entry pool
+        {
+            uint64 bucketBytes = perTableBytes / 4;
+            uint64 poolBytes = perTableBytes - bucketBytes;
+            uint64 numBuckets = floorPow2(bucketBytes / sizeof(int32_t));
+            if (numBuckets < 1024) numBuckets = 1024;
+            int32_t numEntries = (int32_t)(poolBytes / sizeof(LosslessEntry));
+            if (numEntries < 1024) numEntries = 1024;
+
+            hostLosslessTT.buckets = (int32_t *)malloc(numBuckets * sizeof(int32_t));
+            hostLosslessTT.pool = (LosslessEntry *)malloc((uint64)numEntries * sizeof(LosslessEntry));
+            if (hostLosslessTT.buckets && hostLosslessTT.pool)
+            {
+                memset(hostLosslessTT.buckets, 0xFF, numBuckets * sizeof(int32_t));  // -1 = empty
+                hostLosslessTT.bucketMask = numBuckets - 1;
+                hostLosslessTT.nextFree = 0;
+                hostLosslessTT.poolCapacity = numEntries;
+                g_losslessDepth = launchDepth;
+                printf("Host TT[%d] (lossless): %dM pool entries, %lluM buckets (%llu MB)\n",
+                       launchDepth, numEntries / (1024*1024),
+                       (unsigned long long)(numBuckets / (1024*1024)),
+                       (unsigned long long)(perTableBytes / (1024*1024)));
+            }
+            else
+            {
+                printf("Warning: failed to allocate lossless host TT[%d], falling back to lossy\n", launchDepth);
+                free(hostLosslessTT.buckets);
+                free(hostLosslessTT.pool);
+                memset(&hostLosslessTT, 0, sizeof(hostLosslessTT));
+            }
+        }
+
+        // Regular lossy tables for other CPU depths
         uint64 entriesPerTable = floorPow2(perTableBytes / sizeof(TTEntry));
         if (entriesPerTable < 1024) entriesPerTable = 1024;
 
         for (int d = launchDepth; d <= maxDepth && d < MAX_TT_DEPTH; d++)
         {
+            if (d == g_losslessDepth) continue;  // handled by lossless TT
             hostTTs[d].entries = (TTEntry *)malloc(entriesPerTable * sizeof(TTEntry));
             if (!hostTTs[d].entries)
             {
@@ -148,6 +218,154 @@ void initTT(int launchDepth, int maxDepth)
     printf("\n");
     fflush(stdout);
 #endif
+}
+
+void resetCallStats()
+{
+    g_oomFallbackCount = 0;
+#if VERBOSE_LOGGING
+    g_gpuCallCount = 0;
+    g_gpuCallTotalTime = 0.0;
+    g_gpuCallMinTime = 1e30;
+    g_gpuCallMaxTime = 0.0;
+    g_hostTTHits = 0;
+    g_hostTTMisses = 0;
+    g_iterPeakBfsMemory = 0;
+    memset(g_callSizeHist, 0, sizeof(g_callSizeHist));
+    memset(g_callSizeLeafSum, 0, sizeof(g_callSizeLeafSum));
+    memset(g_callSizeTimeSum, 0, sizeof(g_callSizeTimeSum));
+    memset(g_callTimeHist, 0, sizeof(g_callTimeHist));
+    memset(g_callTimeTimeSum, 0, sizeof(g_callTimeTimeSum));
+    memset(g_bfsLevelPositionSum, 0, sizeof(g_bfsLevelPositionSum));
+    memset(g_bfsLevelCallCount, 0, sizeof(g_bfsLevelCallCount));
+    g_totalLeafPositions = 0;
+    g_iterStartWallTime = std::chrono::steady_clock::now();
+    g_lastProgressWallTime = 0;
+#endif
+}
+
+#if VERBOSE_LOGGING
+size_t getIterPeakBfsMemory() { return g_iterPeakBfsMemory; }
+#endif
+uint64 getOomFallbackCount() { return g_oomFallbackCount; }
+
+void printTTStats()
+{
+#if VERBOSE_LOGGING
+    if (g_gpuCallCount > 0)
+    {
+        double avgMs = (g_gpuCallTotalTime / g_gpuCallCount) * 1000.0;
+        printf("  GPU BFS calls: %llu, total: %.3fs, avg: %.3fms, min: %.3fms, max: %.3fms",
+               (unsigned long long)g_gpuCallCount, g_gpuCallTotalTime,
+               avgMs, g_gpuCallMinTime * 1000.0, g_gpuCallMaxTime * 1000.0);
+        if (g_oomFallbackCount > 0)
+            printf(", OOM fallbacks: %llu", (unsigned long long)g_oomFallbackCount);
+        printf("\n");
+    }
+    if (g_hostTTHits > 0 || g_hostTTMisses > 0)
+    {
+        uint64 total = g_hostTTHits + g_hostTTMisses;
+        printf("  Host TT probes: %llu hits / %llu total (%.1f%%)\n",
+               (unsigned long long)g_hostTTHits, (unsigned long long)total,
+               total > 0 ? 100.0 * g_hostTTHits / total : 0.0);
+    }
+    if (g_iterPeakBfsMemory > 0)
+    {
+        printf("  Peak BFS memory: %llu MB / %llu MB (%.1f%%)\n",
+               (unsigned long long)(g_iterPeakBfsMemory / (1024*1024)),
+               (unsigned long long)(PREALLOCATED_MEMORY_SIZE / (1024*1024)),
+               100.0 * g_iterPeakBfsMemory / PREALLOCATED_MEMORY_SIZE);
+    }
+    // Detailed call diagnostics (only for iterations with significant GPU calls)
+    if (g_gpuCallCount > 10)
+    {
+        const char *sizeLabels[] = {"0", "1-100", "101-1K", "1K-10K", "10K-100K", "100K-1M", "1M+"};
+        printf("  Call size distribution (by leaf positions):\n");
+        for (int i = 0; i < 7; i++)
+        {
+            if (g_callSizeHist[i] == 0) continue;
+            double avgMs = g_callSizeTimeSum[i] / g_callSizeHist[i] * 1000.0;
+            printf("    %-10s: %6llu calls (%5.1f%%), avg %.2fms",
+                   sizeLabels[i],
+                   (unsigned long long)g_callSizeHist[i],
+                   100.0 * g_callSizeHist[i] / g_gpuCallCount,
+                   avgMs);
+            if (g_callSizeLeafSum[i] > 1000)
+                printf(", %.1f ms/Mleaf", g_callSizeTimeSum[i] * 1000.0 / (g_callSizeLeafSum[i] / 1e6));
+            printf("\n");
+        }
+
+        const char *timeLabels[] = {"<0.01ms", "0.01-0.1ms", "0.1-1ms", "1-10ms", "10-100ms", "100ms+"};
+        printf("  Call time distribution:\n");
+        for (int i = 0; i < 6; i++)
+        {
+            if (g_callTimeHist[i] == 0) continue;
+            printf("    %-12s: %6llu calls (%5.1f%%), %.3fs total (%5.1f%%)\n",
+                   timeLabels[i],
+                   (unsigned long long)g_callTimeHist[i],
+                   100.0 * g_callTimeHist[i] / g_gpuCallCount,
+                   g_callTimeTimeSum[i],
+                   100.0 * g_callTimeTimeSum[i] / g_gpuCallTotalTime);
+        }
+
+        // Per-BFS-level expansion stats
+        if (g_bfsLevelCallCount[0] > 0)
+        {
+            int bfsDepth = g_lastBfsDepth;
+            printf("  Avg BFS level sizes (across %llu calls, perft(%d)):\n",
+                   (unsigned long long)g_gpuCallCount, bfsDepth);
+            for (int i = 0; i < 20 && g_bfsLevelCallCount[i] > 0; i++)
+            {
+                uint64 avgPos = g_bfsLevelPositionSum[i] / g_bfsLevelCallCount[i];
+                int remDepth = bfsDepth - 1 - i;
+                bool isLeaf = (i == g_lastBfsNumLevels - 1);
+                printf("    Level %d (RD=%d%s): avg %llu positions",
+                       i, remDepth >= 0 ? remDepth : 0, isLeaf ? ", leaf" : "",
+                       (unsigned long long)avgPos);
+                if (i > 0 && g_bfsLevelCallCount[i-1] > 0)
+                {
+                    uint64 prevAvg = g_bfsLevelPositionSum[i-1] / g_bfsLevelCallCount[i-1];
+                    if (prevAvg > 0)
+                        printf(" (%.1fx)", (double)avgPos / prevAvg);
+                }
+                printf("\n");
+            }
+        }
+    }
+#if USE_TT
+    // Lossless TT fill level
+    if (g_losslessDepth >= 0 && hostLosslessTT.pool)
+    {
+        int32_t used = hostLosslessTT.nextFree;
+        int32_t capacity = hostLosslessTT.poolCapacity;
+        double pct = capacity > 0 ? 100.0 * used / capacity : 0.0;
+        const char *usedUnit = ""; int32_t usedVal = used;
+        if (used >= 1024*1024) { usedUnit = "M"; usedVal = used / (1024*1024); }
+        else if (used >= 1024) { usedUnit = "K"; usedVal = used / 1024; }
+        printf("  Lossless TT[%d]: %d%s / %dM entries (%.2f%%)",
+               g_losslessDepth,
+               usedVal, usedUnit, capacity / (1024*1024), pct);
+        if (used >= capacity)
+            printf(" *** FULL - new stores dropped! ***");
+        printf("\n");
+    }
+
+    // Lossy host TT occupancy (sample first 1M entries to estimate fill rate)
+    for (int d = 0; d < MAX_TT_DEPTH; d++)
+    {
+        if (!hostTTs[d].entries) continue;
+        uint64 totalEntries = hostTTs[d].mask + 1;
+        uint64 sampleSize = totalEntries < 1048576 ? totalEntries : 1048576;
+        uint64 nonZero = 0;
+        for (uint64 i = 0; i < sampleSize; i++)
+            if (hostTTs[d].entries[i].count != 0) nonZero++;
+        double fillPct = 100.0 * nonZero / sampleSize;
+        printf("  Lossy TT[%d]: %lluM entries, ~%.2f%% occupied\n",
+               d, (unsigned long long)(totalEntries / (1024*1024)), fillPct);
+    }
+#endif // USE_TT
+    fflush(stdout);
+#endif // VERBOSE_LOGGING
 }
 
 void clearDeviceTTs()
@@ -177,6 +395,10 @@ void freeTT()
             hostTTs[d].entries = nullptr;
         }
     }
+    free(hostLosslessTT.buckets);
+    free(hostLosslessTT.pool);
+    memset(&hostLosslessTT, 0, sizeof(hostLosslessTT));
+    g_losslessDepth = -1;
 #endif
 }
 
@@ -210,28 +432,132 @@ uint32 estimateLaunchDepth(QuadBitBoard *pos, GameState *gs, uint8 rootColor)
 }
 
 
+// Effective launch depth — can be decreased mid-iteration on OOM
+static int g_effectiveLD = 0;
+int getEffectiveLD() { return g_effectiveLD; }
+void setEffectiveLD(int ld) { g_effectiveLD = ld; }
+
 // Serial CPU recursion at top levels, launching GPU BFS at launchDepth
 static uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, int depth, int launchDepth, Hash128 hash, void *gpuBuffer, size_t bufferSize)
 {
 #if USE_TT
-    // Probe host TT
+    // Probe host TT (lossless at launch depth, lossy at other depths)
     if (depth >= 2)
     {
         uint64 ttCount;
-        if (ttProbeHost(hostTTs[depth], hash, &ttCount))
+        if (depth == g_losslessDepth)
+        {
+            if (losslessProbe(hostLosslessTT, hash, &ttCount))
+            {
+#if VERBOSE_LOGGING
+                g_hostTTHits++;
+#endif
+                return ttCount;
+            }
+#if VERBOSE_LOGGING
+            g_hostTTMisses++;
+#endif
+        }
+        else if (ttProbeHost(hostTTs[depth], hash, &ttCount))
+        {
+#if VERBOSE_LOGGING
+            g_hostTTHits++;
+#endif
             return ttCount;
+        }
+#if VERBOSE_LOGGING
+        else
+            g_hostTTMisses++;
+#endif
     }
 #endif
 
     uint64 count;
+    bool needCpuFallback = false;
 
-    if (depth <= launchDepth)
+    if (depth <= g_effectiveLD)
     {
+#if VERBOSE_LOGGING
+        auto t0 = std::chrono::high_resolution_clock::now();
+#endif
         count = perft_gpu_host_bfs(pos, gs, color, depth, gpuBuffer, bufferSize);
+
+        if (g_lastBfsOom)
+        {
+            needCpuFallback = true;
+            g_oomFallbackCount++;
+            if (g_effectiveLD > 2 && depth >= g_effectiveLD)
+            {
+                printf("  >> OOM at GPU depth %d, decreasing effective LD: %d -> %d\n",
+                       depth, g_effectiveLD, g_effectiveLD - 1);
+                g_effectiveLD--;
+            }
+        }
+#if VERBOSE_LOGGING
+        else
+        {
+            double secs = std::chrono::duration<double>(
+                std::chrono::high_resolution_clock::now() - t0).count();
+            g_gpuCallCount++;
+            g_gpuCallTotalTime += secs;
+            if (secs < g_gpuCallMinTime) g_gpuCallMinTime = secs;
+            if (secs > g_gpuCallMaxTime) g_gpuCallMaxTime = secs;
+            if (g_lastBfsPeakMemory > g_iterPeakBfsMemory) g_iterPeakBfsMemory = g_lastBfsPeakMemory;
+
+            int leafCount = g_lastLeafCount;
+            int bucket;
+            if (leafCount == 0) bucket = 0;
+            else if (leafCount <= 100) bucket = 1;
+            else if (leafCount <= 1000) bucket = 2;
+            else if (leafCount <= 10000) bucket = 3;
+            else if (leafCount <= 100000) bucket = 4;
+            else if (leafCount <= 1000000) bucket = 5;
+            else bucket = 6;
+            g_callSizeHist[bucket]++;
+            g_callSizeLeafSum[bucket] += leafCount;
+            g_callSizeTimeSum[bucket] += secs;
+            g_totalLeafPositions += leafCount;
+
+            double ms = secs * 1000.0;
+            int tbucket;
+            if (ms < 0.01) tbucket = 0;
+            else if (ms < 0.1) tbucket = 1;
+            else if (ms < 1.0) tbucket = 2;
+            else if (ms < 10.0) tbucket = 3;
+            else if (ms < 100.0) tbucket = 4;
+            else tbucket = 5;
+            g_callTimeHist[tbucket]++;
+            g_callTimeTimeSum[tbucket] += secs;
+
+            for (int i = 0; i < g_lastBfsNumLevels && i < 20; i++)
+            {
+                g_bfsLevelPositionSum[i] += g_lastBfsLevelCounts[i];
+                g_bfsLevelCallCount[i]++;
+            }
+
+            double wallElapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - g_iterStartWallTime).count();
+            if (wallElapsed - g_lastProgressWallTime >= 10.0)
+            {
+                uint64 totalProbes = g_hostTTHits + g_hostTTMisses;
+                printf("  [%.0fs] %llu GPU calls (%.0f/s), host TT %.1f%%, avg call: %.2fms, avg leaf: %llu, OOM: %llu\n",
+                       wallElapsed,
+                       (unsigned long long)g_gpuCallCount,
+                       (double)g_gpuCallCount / wallElapsed,
+                       totalProbes > 0 ? 100.0 * g_hostTTHits / totalProbes : 0.0,
+                       g_gpuCallTotalTime / g_gpuCallCount * 1000.0,
+                       (unsigned long long)(g_totalLeafPositions / g_gpuCallCount),
+                       (unsigned long long)g_oomFallbackCount);
+                fflush(stdout);
+                g_lastProgressWallTime = wallElapsed;
+            }
+        }
+#endif
     }
-    else
+
+    if (depth > g_effectiveLD || needCpuFallback)
     {
-        // Serial CPU recursion
+        // Serial CPU recursion (normal path or GPU OOM fallback)
         CMove moves[MAX_MOVES];
         QuadBitBoard childPos;
         GameState childGs;
@@ -262,9 +588,14 @@ static uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, i
     }
 
 #if USE_TT
-    // Store in host TT
+    // Store in host TT (lossless at launch depth, lossy at other depths)
     if (depth >= 2)
-        ttStoreHost(hostTTs[depth], hash, count);
+    {
+        if (depth == g_losslessDepth)
+            losslessStore(hostLosslessTT, hash, count);
+        else
+            ttStoreHost(hostTTs[depth], hash, count);
+    }
 #endif
 
     return count;

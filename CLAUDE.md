@@ -5,6 +5,25 @@
 - Never add `Co-Authored-By` lines to commit messages
 - Always do clean rebuilds (`--clean-first`) after editing headers - NVCC doesn't reliably track transitive header dependencies
 
+## Branch Status
+- **`transposition-tables`** (main working branch, **dirty — uncommitted OOM fix + logging work**):
+  - Dedup generation counter (+0.7%, eliminates memset)
+  - Lossless CPU hash at launch depth (neutral, kept for deep perft)
+  - HOST_TT_BUDGET_MB = 65536
+  - **OOM fallback fix**: all BFS OOM paths signal g_lastBfsOom, caller falls back to CPU recursion
+  - **Mid-iteration LD decrease**: g_effectiveLD drops on first OOM, prevents cascading corruption
+  - **Dynamic LD increase DISABLED**: root perft(N) memory doesn't predict worst-case perft(N+1)
+  - **Device TTs**: allocated for depths 3 through LD-1 only (5 TTs at 512M each for LD=8)
+  - **VERBOSE_LOGGING switch** (switches.h, off by default): call size/time histograms, per-BFS-level stats, progress reporting
+  - **WIP**: moving ALL logging behind VERBOSE_LOGGING — basic call stats + TT stats still print when off. Need to finish wrapping them. Code does NOT currently build cleanly with VERBOSE_LOGGING=0 due to partially-complete refactor.
+  - **Baseline at LD=8**: perft 10 = 3.58s, 19,398B nps | perft 11 = 45.1s, 46,464B nps | perft 12 = 662s, 94,896B nps
+- **`async-streams`** (WIP side branch, branched from transposition-tables):
+  - All of the above PLUS CUDA streams + background thread for GPU BFS overlap
+  - 2 streams, split buffer (8GB each), pinned readback memory, stream-local sync
+  - Currently regresses ~3.7% due to per-call std::thread create/join overhead
+  - **Next session TODO**: thread pool (create once at init), separate full-size 16GB buffers,
+    profile with Nsight Systems to identify regression source
+
 ## Architecture
 - Host-driven BFS with CUDA kernels per phase per level
 - QuadBitBoard (4x uint64 = 32 bytes) + GameState (1 byte packed bitfields: whiteCastle:2 + blackCastle:2 + enPassent:4)
@@ -16,18 +35,18 @@
 - Combined magic entry struct: mask+factor co-located for single cache-line access
 - Pure CPU path available via `-cpu` flag (template-specialized, countMoves at leaf)
 - **Transposition tables**: 128-bit Zobrist hash, separate TT per depth, XOR lockless 16-byte entries
-  - Device TTs (depths 2..launchDepth-1): probed in GPU BFS downsweep, stored via upsweep
+  - Device TTs (depths 3..launchDepth-1): probed in GPU BFS downsweep, stored via upsweep
   - Host TTs (depths launchDepth..maxDepth): probed/stored in CPU recursion
   - Upsweep: after leaf kernel, reduces per-position counts back through BFS levels
   - Leaf TT: fused kernel probes/stores via HASH_IN_LEAF_KERNEL switch
 
 ## File Structure
-- `perft.cu` — main entry point, CLI parsing, `-cpu` flag handling
-- `launcher.cu` / `launcher.h` — GPU init, launch depth estimation, GPU+CPU perft launchers, CPU perft, TT allocation
-- `perft_kernels.cu` — GPU kernels, device helpers, host-driven BFS, upsweep, move generator init
+- `perft.cu` — main entry point, CLI parsing, `-cpu` flag handling, LD adjustment
+- `launcher.cu` / `launcher.h` — GPU init, launch depth estimation, GPU+CPU perft launchers, CPU perft, TT allocation, OOM fallback, diagnostics
+- `perft_kernels.cu` — GPU kernels, device helpers, host-driven BFS, upsweep, move generator init, OOM signaling
 - `MoveGeneratorBitboard.h` — move generation logic (templates + magics), ~1950 lines
 - `chess.h` — core data structures (QuadBitBoard, GameState, CMove, magic entries)
-- `switches.h` — compile-time flags (BLOCK_SIZE, MIN_BLOCKS_PER_MP, USE_TT, HASH_IN_LEAF_KERNEL, etc.)
+- `switches.h` — compile-time flags (BLOCK_SIZE, MIN_BLOCKS_PER_MP, USE_TT, HASH_IN_LEAF_KERNEL, VERBOSE_LOGGING, etc.)
 - `zobrist.h` / `zobrist.cpp` — 128-bit Zobrist hashing (Hash128, ZobristRandoms, computeHash, updateHashAfterMove)
 - `tt.h` — transposition table (TTEntry, TTTable, probe/store functions)
 - `uint128.h` — simple 128-bit integer for deep perft accumulation
@@ -36,24 +55,82 @@
 - `Magics.cpp` — magic number discovery routines
 
 ## Performance
-- RTX 6000 Pro Blackwell (with TT + upsweep store): Startpos perft 9 ~6865B nps (0.36s), Position 2 perft 7 ~4846B nps (0.077s)
-- RTX 6000 Pro Blackwell (no TT baseline): Startpos perft 9 ~1027B nps (2.38s), Position 2 perft 7 ~1825B nps (0.205s)
+- RTX 6000 Pro Blackwell (with TT, LD=8, after OOM fix):
+  - Startpos perft 9: 0.31s | perft 10: 3.58s, 19,398B nps
+  - perft 11: 45.1s, 46,464B nps | perft 12: 662s, 94,896B nps
+  - GPU at 580-605W, 88-90°C, 93-100% util throughout perft 12 (confirmed via nvidia-smi)
+- RTX 6000 Pro Blackwell (no TT baseline): Startpos perft 9 ~1027B nps (2.38s)
 - RTX 4090: Startpos perft 9 ~729B nps (3.34s), Position 2 perft 7 ~1103B nps (0.34s)
-- RTX 4090: Startpos perft 10 ~639B nps (108s) — previously impossible (OOM)
 
 ## Benchmarking
-When asked to benchmark, follow this protocol:
-- **Startpos perft 9**: single iteration, report nps and time
-  ```
-  ./build/Release/perft_gpu.exe "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 9
-  ```
-- **Position 2 perft 7**: 10 iterations, report **median** nps. Let the app auto-detect launch depth.
-  ```
-  for i in $(seq 1 10); do ./build/Release/perft_gpu.exe "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1" 7 2>&1 | grep "Perft(07)"; done
-  ```
+For TT performance benchmarking, only test **startpos perft 10 and perft 11** — shallower depths are too fast to measure meaningfully.
+```
+./build/Release/perft_gpu.exe "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 10
+./build/Release/perft_gpu.exe "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 11
+```
 - **Run benchmarks SERIALLY** — never run multiple GPU benchmarks in parallel (corrupts measurements)
 - Always do a clean rebuild (`--clean-first`) before benchmarking if any code changed
-- Compare against baseline numbers above and report delta %
+- Baseline (LD=8, after OOM fix): perft 10 ~19,398B nps (3.58s), perft 11 ~46,464B nps (45.1s), perft 12 ~94,896B nps (662s)
+
+## OOM Handling (FIXED)
+
+### Previous Bug
+- BFS OOM returned 0 or partial results (perft_2level_from_board_kernel fallback was wrong)
+- Wrong values stored in TTs, poisoning ALL future lookups
+- Cascading corruption: wrong TT entry → less pruning → larger BFS → more OOMs
+- Perft 12 gave 37.5T instead of correct 62.9T (40% undercount)
+
+### Fix
+- All BFS OOM paths set `g_lastBfsOom = true` + `cudaDeviceSynchronize()` before returning 0
+- Fixed OOM paths: d_curBoards/d_curStates/d_curHashes/d_moveCounts/d_ttHitCounts, d_newIndices/d_newMoves, d_leafCounts, d_parentCounts, partition overflow
+- Caller (`perft_cpu_recurse`) detects OOM via `g_lastBfsOom`, falls back to CPU recursion
+- CPU recursion recurses one level deeper, sub-calls retry GPU at depth-1 (smaller BFS, fits in memory)
+- `g_effectiveLD` decreased mid-iteration on first OOM — prevents all future OOMs in that iteration
+- Removed the old `perft_2level_from_board_kernel` OOM fallback (was returning wrong results)
+- Removed noisy "OOM: need X bytes..." printf from GpuBumpAllocator (confusing, not actionable)
+
+## Launch Depth (LD=8, no dynamic increase)
+
+### Why LD increase is disabled
+- Root perft(N) memory does NOT predict worst-case perft(N+1) from arbitrary positions
+- Perft(8) from root: 793MB (4.8% of 16GB) — looks safe to increase
+- But perft(9) from some non-root positions: >16GB → OOM
+- LD=9 at perft 12: **~75% slower** than LD=8 due to OOMs + TT dilution (9 TTs at 256M each vs 5 at 512M)
+
+### Current behavior
+- LD fixed at memory-estimated initial value (8 for startpos)
+- LD can still DECREASE on OOM mid-iteration (via g_effectiveLD)
+- Manual LD override via 3rd CLI argument still works
+- Device TTs allocated for depths 3 through LD-1 only (5 TTs at 512M each for LD=8)
+- Post-iteration: only decreases LD if OOM fallbacks occurred, never increases
+
+## Verbose Logging (VERBOSE_LOGGING switch, WIP)
+
+### What's behind the switch (when VERBOSE_LOGGING=1)
+- GPU BFS call stats: count, total/avg/min/max time, OOM fallback count
+- Host TT probe stats: hits/misses/hit rate
+- Peak BFS memory tracking
+- Call size histogram (by leaf position count: 0, 1-100, ..., 1M+)
+- Call time histogram (<0.01ms through 100ms+)
+- Per-BFS-level position count tracking (avg expansion ratios)
+- Progress reporting every 10s (calls/sec, host TT hit%, avg call time, OOM count)
+- TT fill level stats (lossless + lossy occupancy)
+- Per-GPU-call leaf count + BFS level counts in perft_kernels.cu
+
+### WIP status
+- **Code does NOT build with VERBOSE_LOGGING=0** — partially refactored
+- Need to finish wrapping: some stats variables (g_gpuCallCount, etc.) and their collection code are only partially behind the switch
+- All the verbose histogram/progress code IS properly wrapped
+- OOM handling (g_lastBfsOom, g_oomFallbackCount, g_effectiveLD) stays unconditional — not logging
+
+### Perft 12 diagnostics (from VERBOSE_LOGGING=1 run)
+- 101,239 GPU calls, avg 6.5ms, min 0.015ms, max 164ms
+- 29.4% of calls had 0 leaf positions (all TT hits, ~0.17ms each, ~5s total = 0.8%)
+- 57.2% had 1M+ leaf positions (avg 11ms, bulk of compute time)
+- Host TT hit rate: 38.5% (lossless at LD=8)
+- GPU at 580-605W throughout (confirmed via nvidia-smi every 5s for full 11 min run)
+- 0 OOM fallbacks, peak BFS memory 18.3%
+- BFS expansion ratios: 12-18x per level (device TTs provide moderate pruning)
 
 ## Kernel Bottleneck Analysis (Nsight Compute)
 
@@ -86,10 +163,11 @@ When asked to benchmark, follow this protocol:
 ### RTX 4090 comparison
 - ALU heavy pipe: 85% SM utilization (vs 52.4% on Blackwell — wider pipes spread load)
 
-### BFS overhead is negligible
-- Nsight Systems trace: leaf kernel = 99.4% of GPU time
-- All BFS kernels + interval expand + prefix sum = 0.6%
-- CPU overhead = ~0.7% (kernel launches + cudaMemcpy)
+### BFS overhead (with TT)
+- Nsight Systems trace: leaf kernel = 88.7% of GPU time (was 99.4% pre-TT)
+- TT prunes subtrees → BFS/upsweep/dedup become relatively more visible
+- Upsweep 4.2%, makemove 2.7%, dedup 1.7%, generate 1.5%, interval expand 0.9%
+- GPU idle gaps: 293ms (6.5%) — CPU recursion between GPU BFS calls
 
 ## Transposition Table Design
 
@@ -110,7 +188,7 @@ When asked to benchmark, follow this protocol:
 
 ### TT Memory Layout
 - Separate TT per remaining depth (no depth field in entries)
-- Device TTs: depths 2 through launchDepth-1 (GPU `cudaMalloc`, separate from BFS buffer)
+- Device TTs: depths 3 through launchDepth-1 (GPU `cudaMalloc`, separate from BFS buffer)
 - Host TTs: depths launchDepth through maxDepth (`malloc`, not pinned)
 - Budget: `DEVICE_TT_BUDGET_MB` / `HOST_TT_BUDGET_MB` divided equally among TTs per category
 - TTs persist across depth iterations (perft(d) from a position is depth-invariant)
@@ -128,10 +206,27 @@ When asked to benchmark, follow this protocol:
 - Most impactful optimization: `hostTTs[launchDepth]` caches entire GPU BFS calls
 - `perft_cpu` (template, -cpu mode): same probe/store pattern with host TTs
 
-### TT Sizing (current defaults)
-- Device TTs: 2GB total budget → ~16M entries per depth at launchDepth=8 (6 depths × 256MB each)
-- Host TTs: 2GB total budget → 64M entries per depth for CPU levels
-- Entries: 16 bytes each, power-of-2 table sizes
+### Unique Positions per Ply (OEIS A083276, startpos)
+Critical for TT sizing — unique positions grow ~9-10x per ply vs ~28-30x for total paths:
+| Ply | Unique Positions | Total (perft) | Transposition Ratio |
+|-----|-----------------|---------------|---------------------|
+| 5 | 822,518 | 4,865,609 | 5.9x |
+| 6 | 9,417,681 | 119,060,324 | 12.6x |
+| 7 | 96,400,068 | 3,195,901,860 | 33.2x |
+| 8 | 988,187,354 | 84,998,978,956 | 86x |
+| 9 | 9,183,421,888 | 2,439,530,234,167 | 266x |
+| 10 | 85,375,278,064 | 69,352,859,712,417 | 812x |
+| 11 | 726,155,461,002 | 2,097,651,003,696,806 | 2,889x |
+
+### GPU BFS Call Scaling (startpos, LD=8, after OOM fix)
+| Perft | GPU Calls | Avg ms | Max ms | Host TT Hit% | Total Time |
+|-------|-----------|--------|--------|--------------|------------|
+| 9 | 20 | 15.3 | 25.4 | 0% | 0.31s |
+| 10 | 400 | 8.9 | 26.4 | 0% | 3.58s |
+| 11 | 7,602 | 5.9 | 56.4 | 13.9% | 45.1s |
+| 12 | 101,239 | 6.5 | 164.0 | 38.5% | 662s |
+- GPU calls track OEIS unique positions at abs depth N-8 (remaining depth = LD)
+- ~29% of perft 12 calls have 0 leaf positions (all device TT hits, ~0.17ms each)
 
 ### Known TT Behavior
 - Startpos perft 9: +569% speedup with upsweep TT store (6865B vs 1027B nps)
@@ -151,7 +246,7 @@ When asked to benchmark, follow this protocol:
 ### Dynamic launch depth [+5-6%]
 - Memory budget multiplied by branching factor (2-level leaf saves one expansion)
 - Higher launch depth = fewer CPU calls
-- Dynamic OOM fallback: perft_2level_from_board_kernel
+- Dynamic OOM fallback: CPU recursion retry at depth-1
 
 ### __launch_bounds__(384, 3) on leaf kernel [+4-9%]
 - Forces 56 registers (from 70), increases occupancy 50% → 75%
@@ -183,9 +278,14 @@ When asked to benchmark, follow this protocol:
 - Upsweep result is authoritative (leaf global atomic misses TT-hit subtrees)
 - BFS early-exit fix: when nextLevelCount=0, set currentCount=0 to prevent leaf double-counting
 
+### OOM fallback [correctness fix]
+- All BFS OOM paths signal g_lastBfsOom, caller falls back to CPU recursion at depth-1
+- Mid-iteration LD decrease (g_effectiveLD) prevents cascading OOMs
+- Fixed critical bug: previous OOM handling returned 0, corrupting TTs and causing 40% undercount
+
 ### Code cleanup [cleanliness]
 - Removed 13 compile-time flags, ~2.6MB unused tables
-- 8 active flags remain in switches.h (BLOCK_SIZE, LIMIT_REGISTER_USE, MIN_BLOCKS_PER_MP, PREALLOCATED_MEMORY_SIZE, USE_COMBINED_MAGIC_GPU, USE_TT, HASH_IN_LEAF_KERNEL, DEVICE/HOST_TT_BUDGET_MB)
+- 9 active flags in switches.h (BLOCK_SIZE, LIMIT_REGISTER_USE, MIN_BLOCKS_PER_MP, PREALLOCATED_MEMORY_SIZE, USE_COMBINED_MAGIC_GPU, USE_TT, HASH_IN_LEAF_KERNEL, DEVICE/HOST_TT_BUDGET_MB, VERBOSE_LOGGING)
 
 ## Rejected Optimizations (tried and measured)
 
@@ -320,6 +420,14 @@ When asked to benchmark, follow this protocol:
 - Smaller block sizes (256, 320, 352) consistently worse than 384
 - Current 384/3 (56 regs, 75% occupancy) is the sweet spot
 
+### Dynamic LD increase 8→9 [REJECTED — 75% regression at perft 12]
+- Root perft(8) uses 4.8% memory → heuristic increased LD to 9
+- At LD=9, some perft(9) calls from non-root positions exceed 16GB → OOM
+- Device TTs spread across 9 depths (256M each) instead of 5 (512M each) → less effective
+- Per-call time 13x larger at LD=9 (120ms vs 9ms) but only 9x fewer calls → net slower
+- OOMs corrupted TTs causing cascading performance degradation
+- Fix: disabled LD increase entirely, LD can only decrease on OOM
+
 ## Key Lessons
 
 ### GPU optimization
@@ -338,64 +446,128 @@ When asked to benchmark, follow this protocol:
 - The only thing that can beat AI is human willingness to try "stupid" ideas
 - Never give up trying — there's always one more thing to optimize
 
-## Potential TT Optimization Ideas (untested)
+### OOM handling
+- **Never return wrong results from GPU OOM** — they poison TTs and cause cascading failures
+- Signal OOM to caller, let it retry at smaller depth or fall back to CPU
+- Add cudaDeviceSynchronize before OOM returns to prevent stale kernel interference
+- Root perft(N) memory does NOT predict worst-case from arbitrary positions — don't use it for LD increase
 
-### TT sizing tuning
-- Current: equal size per depth. Deeper depths see more unique positions → might benefit from larger TTs
-- Try: scale TT size by expected position count per depth (exponential growth toward leaves)
-- Try: single shared TT across depths (add depth field to entry) to maximize utilization
+## Nsight Systems Profile (startpos perft 10, with TT)
 
-### Register pressure with TT
-- Hash computation adds ~4-5 registers. Nsight Compute profile needed to check if still at 56 cap
-- If register pressure increased: try reducing hash to 64-bit for shallow device TTs (depths 2-3)
-- Could split hash update into template-specialized version (chance=template) to reduce branch code
+### Kernel time breakdown
+| Kernel | Calls | Total (ms) | % of GPU |
+|--------|-------|-----------|----------|
+| fused_2level_leaf_kernel | 425 | 3734.9 | 88.7% |
+| makemove_and_count_moves_kernel | 2116 | 114.7 | 2.7% |
+| Upsweep (reduce+store+redirects) | 6774 | 177.7 | 4.2% |
+| Dedup (write+check) | 4232 | 69.6 | 1.7% |
+| generate_moves_kernel | 2116 | 63.5 | 1.5% |
+| mp_interval_expand_kernel | 2116 | 36.6 | 0.9% |
+| CUB prefix sum | 4232 | 7.9 | 0.2% |
+| Memset | 5517 | 78.8 | (overlaps) |
 
-### TT-aware launch depth
-- With TT, CPU-side TT hits at launchDepth save entire GPU calls → may want lower launch depth
-- Current estimator doesn't account for TT hit rate — could adapt dynamically based on observed hits
-- The hash arrays add ~24 bytes/position per BFS level → effective memory budget reduced
+### Key metrics
+- ~425 GPU BFS calls per perft(10), each ~9.7ms average
+- GPU wall clock 4504ms, kernel time 4210ms, GPU idle 293ms (6.5%)
+- 91% of leaf time in calls >10ms (207 calls)
+- Leaf kernel duration: min 0.08ms, avg 8.8ms, max 27.3ms
 
-### BFS-level deduplication (alternative to TT)
-- Instead of TT, sort positions by hash at each BFS level and merge duplicates
-- Track multiplicity: same position from different parents gets counted once with weight
-- Eliminates ALL duplicate work (not just cached subset), but requires sort + compact at each level
-- Could combine with TT: deduplicate within a GPU call, TT across GPU calls
+## Current Architecture (streams + threading, WIP)
 
-### Upsweep optimization
-- Current: atomicAdd per child in reduce_by_parent → contention ~30 per parent
-- Alternative: segmented reduction (indices are sorted from interval expand)
-- Alternative: use CUB's DeviceSegmentedReduce with segment boundaries from prefix sums
+### Async GPU BFS (in progress — currently regresses 3.7%)
+- 2 CUDA streams, 2 buffer halves (8GB each from 16GB preallocated)
+- perft_gpu_host_bfs uses explicit stream: all kernels, memsets, CUB use stream param
+- cudaMemcpy → cudaMemcpyAsync + cudaStreamSynchronize (pinned readback memory)
+- cudaDeviceSynchronize → cudaStreamSynchronize (stream-local sync)
+- Background thread submits GPU BFS on stream 1 while main thread works on stream 0
+- Lossless TT store is thread-safe (InterlockedIncrement + CAS for chain prepend)
+- **Current regression cause**: thread create/join overhead (~30µs × 425 calls ≈ 12ms),
+  plus half-buffer may affect bump allocator patterns. Need profiling.
 
-### Host TT with pinned memory
-- Current: host TTs use regular malloc
-- Pinned memory (cudaHostAlloc) could enable zero-copy GPU access for CPU-level TTs
-- Useful if GPU BFS levels overlap with host TT depths (e.g., variable launch depth)
+### Next steps for async (next session)
+- Create thread pool once at init (avoid per-call thread create/join overhead)
+- Try with full 16GB buffer for each stream (allocate 2 separate buffers)
+- Profile with Nsight Systems to identify where the regression comes from
+- Consider: the GPU may already be fully saturated (88% leaf kernel), so overlapping
+  two calls may just slow both down via SM contention
 
-### HASH_IN_LEAF_KERNEL impact
-- Currently enabled. Need to benchmark with it disabled (set to 0) to measure leaf TT benefit vs overhead
-- Leaf TT adds hash computation + probe to the hottest kernel — register pressure concern
-- Nsight Compute re-profiling needed to check register count, occupancy, stall breakdown
+## Committed TT Optimizations (beyond base TT)
 
-### Shallow hash entries (from reference perft_gpu)
-- Reference uses 8-byte entries at shallow depths (perft values fit in 24 bits, pack into hash key)
-- Doubles effective table capacity for leaves where most positions live
-- Our current 16-byte uniform entries waste space at depths 1-4 where counts are small
-- Could use: `ShallowTTEntry { uint64 hashHi_xor_count24; }` at depths 2-4
+### Dedup generation counter (eliminates dedup memset) [+0.7%]
+- Pack 32-bit generation into upper bits of DedupEntry.index1
+- Bump generation each BFS level; stale entries ignored (wrong generation)
+- Eliminates 54ms of cudaMemset for >100MB dedup tables
+- write_dedup_table and check_duplicates take generation parameter
+
+### Lossless CPU hash at launch depth [neutral but kept]
+- LosslessEntry: 24 bytes (hashKey, count, next chain pointer)
+- LosslessTT: bucket array (int32 heads, -1=empty) + entry pool (bump allocator)
+- Thread-safe store: _InterlockedIncrement for pool alloc, CAS loop for chain prepend
+- Probe walks chain comparing hashKey = hash.hi ^ hash.lo
+- At perft 10-11, neutral vs lossy (pool capacity ~85M vs 128M lossy entries)
+- Expected to help at deeper perft (12+) where more unique positions accumulate
+
+### HOST_TT_BUDGET_MB increase [2048 → 65536, neutral but kept]
+- User has 90GB+ free system memory, no reason to be conservative
+- Host TTs are massively oversized even at perft 13 (822K entries needed vs 512M available)
+- Not a bottleneck — kept generous to avoid any edge cases at very deep perft
+
+## Rejected TT Optimizations (tried and measured)
+
+### HASH_IN_LEAF_KERNEL [REJECTED — 35% regression]
+- Adding hash compute + TT probe/store to fused 2-level leaf kernel
+- Hash overhead (~8 __ldg + ALU) runs for ALL threads, depth-2 TT hit rate too low
+- Tested with 8GB equal-share, 512MB fixed shallow TTs — always net loss
+- Reference avoids this: BFS goes unfused to depth 2 (normal BFS level, not leaf kernel)
+- The fused 2-level leaf architecture is incompatible with efficient leaf-level hashing
+
+### Shallow 8-byte TT entries [REJECTED — only useful with HASH_IN_LEAF_KERNEL]
+- ShallowTTEntry: 8 bytes, [63:24]=40-bit hash verification, [23:0]=24-bit count
+- Doubles capacity vs 16-byte TTEntry for same memory at depth 2
+- Moot since leaf TT is disabled; depth 2 has no TT without HASH_IN_LEAF_KERNEL
+
+### Segmented upsweep reduction [REJECTED — 1% regression]
+- Replace atomicAdd scatter (reduce_by_parent) with per-parent sequential sum
+- Used inclusive prefix sums (saved during forward pass) as segment boundaries
+- Fused with add_tt_hits_and_store, eliminated parentCounts memset
+- Fewer threads (1 per parent vs 1 per child) → reduced GPU occupancy
+- atomicAdd contention at 30:1 is NOT a bottleneck on Blackwell hardware
+
+### CUDA streams without threading [REJECTED — 1.6% regression]
+- All operations use explicit stream (not default), cudaStreamSynchronize
+- Overhead of cudaMemcpyAsync staging + stream sync exceeds savings from avoiding global sync
+- No true overlap possible with single-threaded CPU — each call still serializes
+
+## Potential Optimization Ideas (untested)
+
+### Non-uniform device TT sizing
+- OEIS data shows unique positions per depth vary enormously (9M at depth 6 vs 85B at depth 10)
+- Current equal-budget-per-depth wastes VRAM on depths with few unique positions
+- Allocate proportional to log(unique_positions) or use a simple large/small split
+
+### Multi-root batching
+- Accumulate multiple root positions, launch single GPU BFS processing all of them
+- Would keep GPU saturated regardless of individual subtree size
+- Requires architectural changes: BFS must track multiple independent root trees
+- Composes with async-streams: batch on stream A while batch B runs
 
 ### Dual-entry replacement (from reference perft_gpu)
-- Reference stores two entries per slot: deepest-ever + most-recent
-- Prevents valuable deep entries from being evicted by shallow ones
-- 32 bytes per slot but halves effective collision rate
-- Most impactful at depths with many unique positions competing for limited slots
+- Two entries per slot: deepest-ever + most-recent
+- Halves effective collision rate, 32 bytes per slot
 
-### BFS-level duplicate detection (from reference perft_gpu)
-- Separate small hash table to find exact duplicates within a single BFS level
-- Before interval expand: if two parent positions generate the same child, keep only one
-- Completely eliminates redundant computation (vs TT which only catches cached subset)
-- Reference used this at depth 1 (FIND_DUPLICATES_IN_BFS flag)
+## Next Session TODO
+1. **Finish VERBOSE_LOGGING refactor**: code doesn't build with VERBOSE_LOGGING=0 — need to finish wrapping all stats variables and collection code behind the switch
+2. **Performance**: perft 12 at 662s, target < 600s
+   - Multi-root batching: accumulate positions, launch single BFS for all
+   - Non-uniform device TT sizing (proportional to unique positions per depth)
+   - Profile with Nsight Systems: where is time spent during perft 12?
+3. Async GPU BFS with thread pool (WIP, on side branch `async-streams`)
+4. Consider larger PREALLOCATED_MEMORY_SIZE if LD=9 would help (need >26GB for some calls)
 
-### Lossless CPU hash tables (from reference perft_gpu)
-- Reference uses chained hash tables (linked lists) for CPU levels — no entry is ever lost
-- More memory hungry but guarantees every computed result is reusable
-- Most impactful at the launch boundary depth where each TT hit saves an entire GPU BFS call
-- Allocates chain entries in large chunks (128M entries per chunk)
+## Perft 16 Feasibility Estimate
+- Growth factor with TT: ~12-13x per depth (vs ~30x raw branching factor)
+- Estimated perft 16 time: ~6-7 months with current setup
+- Key bottlenecks for deep perft:
+  - Host TT capacity: billions of unique positions at LD=8, need massive tables
+  - uint128 overflow: perft(14) ≈ 6.2×10^19 exceeds uint64 max, need uint128 accumulation throughout
+  - TT effectiveness degrades: fixed capacity vs exponentially growing position count

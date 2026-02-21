@@ -171,19 +171,18 @@ struct GpuBumpAllocator
     void *base;
     size_t offset;
     size_t capacity;
-    GpuBumpAllocator(void *buf, size_t cap) : base(buf), offset(0), capacity(cap) {}
+    size_t peakOffset;
+    GpuBumpAllocator(void *buf, size_t cap) : base(buf), offset(0), capacity(cap), peakOffset(0) {}
     template<typename T>
     T* alloc(size_t count)
     {
         size_t bytes = count * sizeof(T);
         bytes = ALIGN_UP(bytes, MEM_ALIGNMENT);
         if (offset + bytes > capacity)
-        {
-            printf("\nOOM: need %llu bytes, only %llu available\n", (unsigned long long)(offset + bytes), (unsigned long long)capacity);
             return nullptr;
-        }
         T* ptr = (T*)((uint8*)base + offset);
         offset += bytes;
+        if (offset > peakOffset) peakOffset = offset;
         return ptr;
     }
     void reset() { offset = 0; }
@@ -451,12 +450,12 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
 struct DedupEntry
 {
     uint64 hashHi;   // full 64-bit hash.hi for verification
-    uint64 index1;   // 1-indexed position (0 = empty)
+    uint64 index1;   // [63:32] = generation, [31:0] = 1-indexed position
 };
 CT_ASSERT(sizeof(DedupEntry) == 16);
 
 // Write position's entry to dedup table using 128-bit atomic store.
-__global__ void write_dedup_table(Hash128 *hashes, DedupEntry *dedupTable, uint64 dedupMask, int n)
+__global__ void write_dedup_table(Hash128 *hashes, DedupEntry *dedupTable, uint64 dedupMask, int n, uint32 generation)
 {
     uint32 idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
@@ -464,14 +463,15 @@ __global__ void write_dedup_table(Hash128 *hashes, DedupEntry *dedupTable, uint6
     uint64 slot = h.lo & dedupMask;
     DedupEntry *ptr = &dedupTable[slot];
     uint64 hi = h.hi;
-    uint64 idx1 = (uint64)(idx + 1);
+    uint64 idx1 = ((uint64)generation << 32) | (uint64)(idx + 1);
     asm volatile("st.global.v2.u64 [%0], {%1,%2};" :: "l"(ptr), "l"(hi), "l"(idx1));
 }
 
 // Check each position against the dedup table using full 64-bit hash.hi verification.
 // Uses 128-bit atomic load to read both fields consistently.
+// Generation check distinguishes current entries from stale data (no memset needed).
 __global__ void check_duplicates(Hash128 *hashes, DedupEntry *dedupTable, uint64 dedupMask,
-                                  int *moveCounts, uint64 *ttHitCounts, int *redirects, int n)
+                                  int *moveCounts, uint64 *ttHitCounts, int *redirects, int n, uint32 generation)
 {
     uint32 idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
@@ -483,9 +483,9 @@ __global__ void check_duplicates(Hash128 *hashes, DedupEntry *dedupTable, uint64
     const DedupEntry *ptr = &dedupTable[slot];
     asm volatile("ld.global.v2.u64 {%0,%1}, [%2];" : "=l"(storedHi), "=l"(storedIdx1) : "l"(ptr));
 
-    if (storedIdx1 != 0)  // skip empty slots
+    if ((storedIdx1 >> 32) == generation)  // skip stale/empty entries
     {
-        uint32 origIdx = (uint32)(storedIdx1 - 1);  // back to 0-indexed
+        uint32 origIdx = (uint32)(storedIdx1 & 0xFFFFFFFF) - 1;  // back to 0-indexed
 
         if (storedHi == h.hi && origIdx != idx)
         {
@@ -557,9 +557,26 @@ struct BFSLevelSave
 // -------------------------------------------------------------------------
 // Host-driven BFS perft
 // -------------------------------------------------------------------------
+// Generation counter for dedup tables — persists across GPU BFS calls so
+// stale entries from previous calls are never mistaken for current ones.
+static uint32 dedupGeneration = 1;
+
+// Peak BFS memory from last GPU call (exposed for dynamic LD adjustment)
+size_t g_lastBfsPeakMemory = 0;
+
+// Per-GPU-call diagnostics
+#if VERBOSE_LOGGING
+int g_lastLeafCount = 0;
+int g_lastBfsLevelCounts[20] = {0};
+int g_lastBfsNumLevels = 0;
+int g_lastBfsDepth = 0;
+#endif
+bool g_lastBfsOom = false;
+
 // Run perft on GPU for a single position using host-driven breadth-first search
 uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int depth, void *gpuBuffer, size_t bufferSize)
 {
+    g_lastBfsOom = false;
     if (depth <= 0)
         return 1;
     if (depth == 1)
@@ -611,6 +628,11 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
     const int MAX_BFS_LEVELS = 20;
     BFSLevelSave levelSaves[MAX_BFS_LEVELS];
     int numLevels = 0;
+#if VERBOSE_LOGGING
+    int bfsLevelIdx = 0;
+    g_lastBfsDepth = depth;
+    if (bfsLevelIdx < 20) g_lastBfsLevelCounts[bfsLevelIdx] = currentCount;
+#endif
     // BFS loop: depth-1 down to bfsMinLevel are intermediate levels
     for (int level = depth - 1; level >= bfsMinLevel; level--)
     {
@@ -624,9 +646,15 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
 #if USE_TT
         d_ttHitCounts = alloc.alloc<uint64>(currentCount);
 #endif
-        if (!d_curBoards || !d_curStates || !d_curHashes || !d_moveCounts)
+        if (!d_curBoards || !d_curStates || !d_curHashes || !d_moveCounts
+#if USE_TT
+            || !d_ttHitCounts
+#endif
+            )
         {
-            printf("\nOOM during BFS at level %d with %d positions\n", level, currentCount);
+            cudaDeviceSynchronize();
+            g_lastBfsOom = true;
+            g_lastBfsPeakMemory = alloc.peakOffset;
             return 0;
         }
         // Step 1: make moves, compute hashes, count child moves, probe TT
@@ -658,12 +686,14 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
 
             if (d_dedupTable && d_redirects)
             {
-                cudaMemset(d_dedupTable, 0, dedupSize * sizeof(DedupEntry));  // 0 = empty
+                // No memset needed: generation counter in each entry distinguishes
+                // current entries from stale data left by previous BFS levels/calls
                 uint64 dedupMask = dedupSize - 1;
 
-                write_dedup_table<<<nBlocks, BLOCK_SIZE>>>(d_curHashes, d_dedupTable, dedupMask, currentCount);
+                write_dedup_table<<<nBlocks, BLOCK_SIZE>>>(d_curHashes, d_dedupTable, dedupMask, currentCount, dedupGeneration);
                 check_duplicates<<<nBlocks, BLOCK_SIZE>>>(d_curHashes, d_dedupTable, dedupMask,
-                    d_moveCounts, d_ttHitCounts, d_redirects, currentCount);
+                    d_moveCounts, d_ttHitCounts, d_redirects, currentCount, dedupGeneration);
+                dedupGeneration++;
             }
             else
             {
@@ -686,6 +716,10 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
         // Step 3: read back total
         int nextLevelCount = 0;
         cudaMemcpy(&nextLevelCount, d_moveCounts + currentCount - 1, sizeof(int), cudaMemcpyDeviceToHost);
+#if VERBOSE_LOGGING
+        bfsLevelIdx++;
+        if (bfsLevelIdx < 20) g_lastBfsLevelCounts[bfsLevelIdx] = nextLevelCount;
+#endif
         if (nextLevelCount == 0)
         {
             currentCount = 0;  // No children to process at the leaf level
@@ -696,18 +730,9 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
         CMove *d_newMoves = alloc.alloc<CMove>(nextLevelCount);
         if (!d_newIndices || !d_newMoves)
         {
-            // Dynamic OOM fallback: use 2-level leaf from the boards we just created.
-            if (level >= 2)
-            {
-                int nBlk = (currentCount - 1) / BLOCK_SIZE + 1;
-                perft_2level_from_board_kernel<<<nBlk, BLOCK_SIZE>>>(d_curBoards, d_curStates,
-                                                                      d_perftCounter, currentCount, levelColor);
-                cudaDeviceSynchronize();
-                uint64 result = 0;
-                cudaMemcpy(&result, d_perftCounter, sizeof(uint64), cudaMemcpyDeviceToHost);
-                return result;
-            }
-            printf("\nOOM for next level with %d moves\n", nextLevelCount);
+            cudaDeviceSynchronize();
+            g_lastBfsOom = true;
+            g_lastBfsPeakMemory = alloc.peakOffset;
             return 0;
         }
         // Step 4: merge-path interval expand
@@ -716,7 +741,9 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
         int numPartitions = numExpandCTAs + 1;
         if (numPartitions > maxPartitions)
         {
-            printf("\nToo many partitions (%d) for pre-allocated buffer (%d)\n", numPartitions, maxPartitions);
+            cudaDeviceSynchronize();
+            g_lastBfsOom = true;
+            g_lastBfsPeakMemory = alloc.peakOffset;
             return 0;
         }
         int partBlocks = (numPartitions + 127) / 128;
@@ -734,10 +761,21 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
         d_moves = d_newMoves;
         currentCount = nextLevelCount;
     }
+#if VERBOSE_LOGGING
+    g_lastLeafCount = currentCount;
+    g_lastBfsNumLevels = bfsLevelIdx + 1;
+#endif
     // Final level: leaf kernel
     uint64 *d_leafCounts = nullptr;
 #if USE_TT
     d_leafCounts = alloc.alloc<uint64>(currentCount);
+    if (!d_leafCounts && currentCount > 0)
+    {
+        cudaDeviceSynchronize();
+        g_lastBfsOom = true;
+        g_lastBfsPeakMemory = alloc.peakOffset;
+        return 0;
+    }
 #endif
     // Determine leaf TT (for fused kernel, remaining depth = bfsMinLevel - 1)
     TTTable leafTT = {nullptr, 0};
@@ -786,9 +824,10 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
             uint64 *d_parentCounts = alloc.alloc<uint64>(parentCount);
             if (!d_parentCounts)
             {
-                // OOM during upsweep — fall back to leaf-only counter
-                cudaMemcpy(&result, d_perftCounter, sizeof(uint64), cudaMemcpyDeviceToHost);
-                return result;
+                // OOM during upsweep — signal to caller for CPU fallback
+                g_lastBfsOom = true;
+                g_lastBfsPeakMemory = alloc.peakOffset;
+                return 0;
             }
             cudaMemset(d_parentCounts, 0, parentCount * sizeof(uint64));
             // Reduce children into parents
@@ -828,6 +867,7 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
         // No upsweep: use leaf kernel's global atomic counter
         cudaMemcpy(&result, d_perftCounter, sizeof(uint64), cudaMemcpyDeviceToHost);
     }
+    g_lastBfsPeakMemory = alloc.peakOffset;
     return result;
 }
 // -------------------------------------------------------------------------

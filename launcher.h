@@ -21,6 +21,23 @@ void perftCPU(QuadBitBoard *pos, GameState *gs, uint8 rootColor, uint32 depth);
 uint64 perft_cpu_dispatch(QuadBitBoard *pos, GameState *gs, uint8 color, uint32 depth);
 
 // Transposition table management
-void initTT(int launchDepth, int maxDepth);
+void initTT(int launchDepth, int maxLaunchDepth, int maxDepth);
 void clearDeviceTTs();
 void freeTT();
+void printTTStats();
+void resetCallStats();
+uint64 getOomFallbackCount();
+int getEffectiveLD();
+void setEffectiveLD(int ld);
+
+// Peak BFS memory from last GPU call (set in perft_kernels.cu)
+extern size_t g_lastBfsPeakMemory;
+
+// Per-GPU-call diagnostics (set in perft_kernels.cu)
+#if VERBOSE_LOGGING
+extern int g_lastLeafCount;
+extern int g_lastBfsLevelCounts[20];
+extern int g_lastBfsNumLevels;
+extern int g_lastBfsDepth;
+#endif
+extern bool g_lastBfsOom;

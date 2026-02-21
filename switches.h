@@ -26,7 +26,10 @@
 #define USE_TT 1                     // master switch for transposition tables
 #define HASH_IN_LEAF_KERNEL 0        // TT probe/store in fused 2-level leaf kernel
 #define DEVICE_TT_BUDGET_MB 0        // GPU memory budget for device TTs (MB). 0 = auto (50% of free VRAM)
-#define HOST_TT_BUDGET_MB 2048       // pinned host memory budget for host TTs (MB)
+#define HOST_TT_BUDGET_MB 65536      // host memory budget for host TTs (MB)
+
+// verbose diagnostics: call size/time histograms, per-BFS-level stats, progress reporting
+#define VERBOSE_LOGGING 0
 
 
 #ifdef __CUDACC__

@@ -89,11 +89,12 @@ int main(int argc, char *argv[])
         fflush(stdout);
 
         // CPU mode: all TTs are host-side, starting from depth 2
-        initTT(2, maxDepth);
+        initTT(2, 2, maxDepth);
 
         for (int depth = 1; depth <= maxDepth; depth++)
         {
             perftCPU(&testBB, &testGS, rootColor, depth);
+            printTTStats();
             fflush(stdout);
         }
 
@@ -118,15 +119,37 @@ int main(int argc, char *argv[])
             launchDepth = maxDepth;
         }
 
-        printf("Launch depth: %d\n", launchDepth);
+        // LD is fixed (never increases dynamically — root memory doesn't predict worst-case).
+        // Can still decrease on OOM during an iteration.
+        int currentLD = (int)launchDepth;
+
+        printf("Launch depth: %d\n", currentLD);
         fflush(stdout);
 
-        initTT(launchDepth, maxDepth);
+        // Device TTs for depths 3 through launchDepth-1 (exact LD range, no overallocation)
+        initTT((int)launchDepth, (int)launchDepth, maxDepth);
 
         for (int depth = 1; depth <= maxDepth; depth++)
         {
-            perftLauncher(&testBB, &testGS, rootColor, depth, launchDepth);
+            int effectiveLD = min(currentLD, depth);
+            resetCallStats();
+            setEffectiveLD(effectiveLD);
+            perftLauncher(&testBB, &testGS, rootColor, depth, effectiveLD);
+            printTTStats();
             fflush(stdout);
+
+            // Adjust LD: only decrease on OOM, never increase.
+            uint64 ooms = getOomFallbackCount();
+            if (ooms > 0 && depth >= (int)launchDepth)
+            {
+                int newLD = getEffectiveLD();
+                if (newLD != currentLD)
+                {
+                    printf("  >> Launch depth adjusted: %d -> %d (OOM fallbacks: %llu)\n",
+                           currentLD, newLD, (unsigned long long)ooms);
+                    currentLD = newLD;
+                }
+            }
         }
 
         freeTT();
