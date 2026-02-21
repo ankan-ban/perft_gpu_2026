@@ -14,9 +14,7 @@ void *preAllocatedBufferHost;
 
 // Global TT arrays
 TTTable deviceTTs[MAX_TT_DEPTH];
-TTTable hostTTs[MAX_TT_DEPTH];
-LosslessTT hostLosslessTT;
-int g_losslessDepth = -1;  // depth using lossless TT (-1 = none)
+LosslessTT hostLosslessTTs[MAX_TT_DEPTH];
 
 static uint64 g_oomFallbackCount = 0;
 #if VERBOSE_LOGGING
@@ -90,11 +88,11 @@ static uint64 floorPow2(uint64 n)
 int g_deviceTTBudgetMB = DEVICE_TT_BUDGET_MB;
 int g_hostTTBudgetMB = HOST_TT_BUDGET_MB;
 
-void initTT(int launchDepth, int maxLaunchDepth, int maxDepth)
+void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFactor)
 {
 #if USE_TT
     memset(deviceTTs, 0, sizeof(deviceTTs));
-    memset(hostTTs, 0, sizeof(hostTTs));
+    memset(hostLosslessTTs, 0, sizeof(hostLosslessTTs));
 
     // Device TTs: depths 3 through maxLaunchDepth-1 (GPU BFS levels)
     // Allocate for the widest possible LD range to support dynamic LD increase.
@@ -145,12 +143,9 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth)
         }
     }
 
-    // Host TTs: depths launchDepth through maxDepth (CPU levels)
-    // Launch depth gets a lossless chained table (no evictions).
-    // Other depths get regular lossy tables.
-    memset(&hostLosslessTT, 0, sizeof(hostLosslessTT));
-    g_losslessDepth = -1;
-
+    // Host TTs: all depths launchDepth through maxDepth use lossless chained tables.
+    // Budget split proportionally to branchingFactor^(maxDepth - d) so deeper
+    // remaining depths (more unique positions) get larger tables.
     int numHostTTs = 0;
     for (int d = launchDepth; d <= maxDepth && d < MAX_TT_DEPTH; d++)
         numHostTTs++;
@@ -158,60 +153,53 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth)
     if (numHostTTs > 0)
     {
         uint64 budgetBytes = (uint64)g_hostTTBudgetMB * 1024 * 1024;
-        uint64 perTableBytes = budgetBytes / numHostTTs;
 
-        // Lossless chained table at launch depth
-        // Split its budget: 25% buckets, 75% entry pool
+        // Compute proportional weights
+        double weights[MAX_TT_DEPTH];
+        memset(weights, 0, sizeof(weights));
+        double totalWeight = 0;
+        for (int d = launchDepth; d <= maxDepth && d < MAX_TT_DEPTH; d++)
         {
-            uint64 bucketBytes = perTableBytes / 4;
-            uint64 poolBytes = perTableBytes - bucketBytes;
-            uint64 numBuckets = floorPow2(bucketBytes / sizeof(int32_t));
-            if (numBuckets < 1024) numBuckets = 1024;
-            int32_t numEntries = (int32_t)(poolBytes / sizeof(LosslessEntry));
-            if (numEntries < 1024) numEntries = 1024;
-
-            hostLosslessTT.buckets = (int32_t *)malloc(numBuckets * sizeof(int32_t));
-            hostLosslessTT.pool = (LosslessEntry *)malloc((uint64)numEntries * sizeof(LosslessEntry));
-            if (hostLosslessTT.buckets && hostLosslessTT.pool)
-            {
-                memset(hostLosslessTT.buckets, 0xFF, numBuckets * sizeof(int32_t));  // -1 = empty
-                hostLosslessTT.bucketMask = numBuckets - 1;
-                hostLosslessTT.nextFree = 0;
-                hostLosslessTT.poolCapacity = numEntries;
-                g_losslessDepth = launchDepth;
-                printf("Host TT[%d] (lossless): %dM pool entries, %lluM buckets (%llu MB)\n",
-                       launchDepth, numEntries / (1024*1024),
-                       (unsigned long long)(numBuckets / (1024*1024)),
-                       (unsigned long long)(perTableBytes / (1024*1024)));
-            }
-            else
-            {
-                printf("Warning: failed to allocate lossless host TT[%d], falling back to lossy\n", launchDepth);
-                free(hostLosslessTT.buckets);
-                free(hostLosslessTT.pool);
-                memset(&hostLosslessTT, 0, sizeof(hostLosslessTT));
-            }
+            weights[d] = pow((double)branchingFactor, maxDepth - d);
+            totalWeight += weights[d];
         }
 
-        // Regular lossy tables for other CPU depths
-        uint64 entriesPerTable = floorPow2(perTableBytes / sizeof(TTEntry));
-        if (entriesPerTable < 1024) entriesPerTable = 1024;
+        uint64 bytesPerSlot = sizeof(LosslessEntry) + sizeof(int32_t);  // pool entry + bucket
 
         for (int d = launchDepth; d <= maxDepth && d < MAX_TT_DEPTH; d++)
         {
-            if (d == g_losslessDepth) continue;  // handled by lossless TT
-            hostTTs[d].entries = (TTEntry *)malloc(entriesPerTable * sizeof(TTEntry));
-            if (!hostTTs[d].entries)
+            uint64 depthBytes = (uint64)(budgetBytes * weights[d] / totalWeight);
+            uint64 numSlots = depthBytes / bytesPerSlot;
+            numSlots = floorPow2(numSlots);
+            if (numSlots < 4 * 1024 * 1024) numSlots = 4 * 1024 * 1024;  // 4M min — positions near root are expensive
+            if (numSlots > (1ull << 30)) numSlots = (1ull << 30);  // cap for int32_t safety
+
+            int32_t poolCap = (int32_t)numSlots;
+            uint64 numBuckets = numSlots;
+
+            hostLosslessTTs[d].buckets = (int32_t *)malloc(numBuckets * sizeof(int32_t));
+            hostLosslessTTs[d].pool = (LosslessEntry *)malloc((uint64)poolCap * sizeof(LosslessEntry));
+            if (hostLosslessTTs[d].buckets && hostLosslessTTs[d].pool)
             {
-                printf("Warning: failed to allocate host TT[%d]\n", d);
-                hostTTs[d].mask = 0;
-                continue;
+                memset(hostLosslessTTs[d].buckets, 0xFF, numBuckets * sizeof(int32_t));  // -1 = empty
+                hostLosslessTTs[d].bucketMask = numBuckets - 1;
+                hostLosslessTTs[d].nextFree = 0;
+                hostLosslessTTs[d].poolCapacity = poolCap;
+
+                uint64 totalMB = (numBuckets * sizeof(int32_t) + (uint64)poolCap * sizeof(LosslessEntry)) / (1024*1024);
+                const char *unit = ""; uint64 dispSlots = numSlots;
+                if (numSlots >= 1024*1024) { unit = "M"; dispSlots = numSlots / (1024*1024); }
+                else if (numSlots >= 1024) { unit = "K"; dispSlots = numSlots / 1024; }
+                printf("Host TT[%d] (lossless): %llu%s entries (%llu MB)\n",
+                       d, (unsigned long long)dispSlots, unit, (unsigned long long)totalMB);
             }
-            memset(hostTTs[d].entries, 0, entriesPerTable * sizeof(TTEntry));
-            hostTTs[d].mask = entriesPerTable - 1;
-            printf("Host TT[%d]: %lluM entries (%llu MB)\n", d,
-                   (unsigned long long)(entriesPerTable / (1024*1024)),
-                   (unsigned long long)(entriesPerTable * sizeof(TTEntry) / (1024*1024)));
+            else
+            {
+                free(hostLosslessTTs[d].buckets);
+                free(hostLosslessTTs[d].pool);
+                memset(&hostLosslessTTs[d], 0, sizeof(LosslessTT));
+                printf("Warning: failed to allocate host TT[%d]\n", d);
+            }
         }
     }
 
@@ -333,35 +321,21 @@ void printTTStats()
         }
     }
 #if USE_TT
-    // Lossless TT fill level
-    if (g_losslessDepth >= 0 && hostLosslessTT.pool)
+    // Lossless host TT fill levels
+    for (int d = 0; d < MAX_TT_DEPTH; d++)
     {
-        int32_t used = hostLosslessTT.nextFree;
-        int32_t capacity = hostLosslessTT.poolCapacity;
+        if (!hostLosslessTTs[d].pool) continue;
+        int32_t used = hostLosslessTTs[d].nextFree;
+        int32_t capacity = hostLosslessTTs[d].poolCapacity;
         double pct = capacity > 0 ? 100.0 * used / capacity : 0.0;
         const char *usedUnit = ""; int32_t usedVal = used;
         if (used >= 1024*1024) { usedUnit = "M"; usedVal = used / (1024*1024); }
         else if (used >= 1024) { usedUnit = "K"; usedVal = used / 1024; }
-        printf("  Lossless TT[%d]: %d%s / %dM entries (%.2f%%)",
-               g_losslessDepth,
-               usedVal, usedUnit, capacity / (1024*1024), pct);
+        printf("  Host TT[%d]: %d%s / %dM entries (%.2f%%)",
+               d, usedVal, usedUnit, capacity / (1024*1024), pct);
         if (used >= capacity)
             printf(" *** FULL - new stores dropped! ***");
         printf("\n");
-    }
-
-    // Lossy host TT occupancy (sample first 1M entries to estimate fill rate)
-    for (int d = 0; d < MAX_TT_DEPTH; d++)
-    {
-        if (!hostTTs[d].entries) continue;
-        uint64 totalEntries = hostTTs[d].mask + 1;
-        uint64 sampleSize = totalEntries < 1048576 ? totalEntries : 1048576;
-        uint64 nonZero = 0;
-        for (uint64 i = 0; i < sampleSize; i++)
-            if (hostTTs[d].entries[i].count != 0) nonZero++;
-        double fillPct = 100.0 * nonZero / sampleSize;
-        printf("  Lossy TT[%d]: %lluM entries, ~%.2f%% occupied\n",
-               d, (unsigned long long)(totalEntries / (1024*1024)), fillPct);
     }
 #endif // USE_TT
     fflush(stdout);
@@ -389,20 +363,14 @@ void freeTT()
             cudaFree(deviceTTs[d].entries);
             deviceTTs[d].entries = nullptr;
         }
-        if (hostTTs[d].entries)
-        {
-            free(hostTTs[d].entries);
-            hostTTs[d].entries = nullptr;
-        }
+        free(hostLosslessTTs[d].buckets);
+        free(hostLosslessTTs[d].pool);
+        memset(&hostLosslessTTs[d], 0, sizeof(LosslessTT));
     }
-    free(hostLosslessTT.buckets);
-    free(hostLosslessTT.pool);
-    memset(&hostLosslessTT, 0, sizeof(hostLosslessTT));
-    g_losslessDepth = -1;
 #endif
 }
 
-uint32 estimateLaunchDepth(QuadBitBoard *pos, GameState *gs, uint8 rootColor)
+uint32 estimateLaunchDepth(QuadBitBoard *pos, GameState *gs, uint8 rootColor, float *outBranchingFactor)
 {
     // estimate branching factor near the root
     double perft1 = (double)perft_cpu_dispatch(pos, gs, rootColor, 1);
@@ -414,6 +382,7 @@ uint32 estimateLaunchDepth(QuadBitBoard *pos, GameState *gs, uint8 rootColor)
     float arithMean = ((perft3 / perft2) + (perft2 / perft1)) / 2;
 
     float branchingFactor = (geoMean + arithMean) / 2;
+    if (outBranchingFactor) *outBranchingFactor = branchingFactor;
     if (arithMean / geoMean > 2.0f)
     {
         printf("\nUnstable position, defaulting to launch depth = 5\n");
@@ -441,24 +410,11 @@ void setEffectiveLD(int ld) { g_effectiveLD = ld; }
 static uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, int depth, int launchDepth, Hash128 hash, void *gpuBuffer, size_t bufferSize)
 {
 #if USE_TT
-    // Probe host TT (lossless at launch depth, lossy at other depths)
+    // Probe host TT (all depths use lossless tables)
     if (depth >= 2)
     {
         uint64 ttCount;
-        if (depth == g_losslessDepth)
-        {
-            if (losslessProbe(hostLosslessTT, hash, &ttCount))
-            {
-#if VERBOSE_LOGGING
-                g_hostTTHits++;
-#endif
-                return ttCount;
-            }
-#if VERBOSE_LOGGING
-            g_hostTTMisses++;
-#endif
-        }
-        else if (ttProbeHost(hostTTs[depth], hash, &ttCount))
+        if (losslessProbe(hostLosslessTTs[depth], hash, &ttCount))
         {
 #if VERBOSE_LOGGING
             g_hostTTHits++;
@@ -466,8 +422,7 @@ static uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, i
             return ttCount;
         }
 #if VERBOSE_LOGGING
-        else
-            g_hostTTMisses++;
+        g_hostTTMisses++;
 #endif
     }
 #endif
@@ -588,13 +543,10 @@ static uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, i
     }
 
 #if USE_TT
-    // Store in host TT (lossless at launch depth, lossy at other depths)
+    // Store in host TT (all depths use lossless tables)
     if (depth >= 2)
     {
-        if (depth == g_losslessDepth)
-            losslessStore(hostLosslessTT, hash, count);
-        else
-            ttStoreHost(hostTTs[depth], hash, count);
+        losslessStore(hostLosslessTTs[depth], hash, count);
     }
 #endif
 
@@ -652,7 +604,7 @@ static uint64 perft_cpu(QuadBitBoard *pos, GameState *gs, uint32 depth, Hash128 
 
 #if USE_TT
     uint64 ttCount;
-    if (ttProbeHost(hostTTs[depth], hash, &ttCount))
+    if (losslessProbe(hostLosslessTTs[depth], hash, &ttCount))
         return ttCount;
 #endif
 
@@ -679,7 +631,7 @@ static uint64 perft_cpu(QuadBitBoard *pos, GameState *gs, uint32 depth, Hash128 
     }
 
 #if USE_TT
-    ttStoreHost(hostTTs[depth], hash, count);
+    losslessStore(hostLosslessTTs[depth], hash, count);
 #endif
 
     return count;

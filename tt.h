@@ -167,11 +167,10 @@ inline void losslessStore(LosslessTT &tt, Hash128 hash, uint64 count)
 
 // Global TT arrays (defined in launcher.cu)
 extern TTTable deviceTTs[MAX_TT_DEPTH];   // GPU memory, indexed by remaining depth
-extern TTTable hostTTs[MAX_TT_DEPTH];     // pinned host memory, indexed by remaining depth
-extern LosslessTT hostLosslessTT;         // lossless chained table for launch depth
+extern LosslessTT hostLosslessTTs[MAX_TT_DEPTH];  // lossless chained tables, indexed by remaining depth
 
 // Initialize TTs based on launch depth and max depth
-void initTT(int launchDepth, int maxLaunchDepth, int maxDepth);
+void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFactor);
 
 // Free all TT memory
 void freeTT();

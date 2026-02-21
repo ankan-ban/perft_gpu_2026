@@ -89,7 +89,7 @@ int main(int argc, char *argv[])
         fflush(stdout);
 
         // CPU mode: all TTs are host-side, starting from depth 2
-        initTT(2, 2, maxDepth);
+        initTT(2, 2, maxDepth, 30.0f);
 
         for (int depth = 1; depth <= maxDepth; depth++)
         {
@@ -102,7 +102,8 @@ int main(int argc, char *argv[])
     }
     else
     {
-        uint32 launchDepth = estimateLaunchDepth(&testBB, &testGS, rootColor);
+        float branchingFactor = 30.0f;
+        uint32 launchDepth = estimateLaunchDepth(&testBB, &testGS, rootColor, &branchingFactor);
         launchDepth = min(launchDepth, (uint32)11);
 
         // for best performance without GPU hash
@@ -127,7 +128,7 @@ int main(int argc, char *argv[])
         fflush(stdout);
 
         // Device TTs for depths 3 through launchDepth-1 (exact LD range, no overallocation)
-        initTT((int)launchDepth, (int)launchDepth, maxDepth);
+        initTT((int)launchDepth, (int)launchDepth, maxDepth, branchingFactor);
 
         for (int depth = 1; depth <= maxDepth; depth++)
         {

@@ -10,7 +10,7 @@ void initGPU(int gpu);
 void initMoveGen();
 
 // Launch depth estimation
-uint32 estimateLaunchDepth(QuadBitBoard *pos, GameState *gs, uint8 rootColor);
+uint32 estimateLaunchDepth(QuadBitBoard *pos, GameState *gs, uint8 rootColor, float *outBranchingFactor = nullptr);
 
 // GPU perft
 void perftLauncher(QuadBitBoard *pos, GameState *gs, uint8 rootColor, uint32 depth, int launchDepth);
@@ -21,7 +21,7 @@ void perftCPU(QuadBitBoard *pos, GameState *gs, uint8 rootColor, uint32 depth);
 uint64 perft_cpu_dispatch(QuadBitBoard *pos, GameState *gs, uint8 color, uint32 depth);
 
 // Transposition table management
-void initTT(int launchDepth, int maxLaunchDepth, int maxDepth);
+void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFactor);
 void clearDeviceTTs();
 void freeTT();
 void printTTStats();
