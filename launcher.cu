@@ -131,7 +131,7 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFa
 
         for (int d = 3; d < maxLaunchDepth && d < MAX_TT_DEPTH; d++)
         {
-            uint64 entries = (d == 3 || d == 4) ? entriesPerTable * 2 : entriesPerTable;
+            uint64 entries = (d >= 3 && d <= 5) ? entriesPerTable * 2 : entriesPerTable;
 
             cudaError_t err = cudaMalloc(&deviceTTs[d].entries, entries * sizeof(TTEntry));
             if (err != cudaSuccess)
