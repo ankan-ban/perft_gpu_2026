@@ -12,7 +12,8 @@ Without transposition tables:
 
 | Position | Depth | Nodes | Time | Speed |
 |---|---|---|---|---|
-| Starting position | 9 | 2,439,530,234,167 | 2.38s | ~1,027 billion nps |
+| Starting position | 9 | 2,439,530,234,167 | 2.05s | ~1,189 billion nps |
+| [Position 2](https://www.chessprogramming.org/Perft_Results#Position_2) (Kiwipete) | 7 | 374,190,009,323 | 0.19s | ~1,965 billion nps |
 
 With transposition tables enabled, lossless host TTs, launch depth 8:
 
