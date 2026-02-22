@@ -155,7 +155,13 @@ int main(int argc, char *argv[])
 
         freeTT();
 
-        cudaFree(preAllocatedBufferHost);
+        for (int w = 0; w < NUM_WORKERS; w++)
+        {
+            cudaFree(g_workers[w].gpuBuffer);
+            cudaStreamDestroy(g_workers[w].stream);
+            cudaFreeHost(g_workers[w].pinnedInt);
+            cudaFreeHost(g_workers[w].pinnedU64);
+        }
         cudaDeviceReset();
     }
 

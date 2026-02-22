@@ -2,21 +2,27 @@
 
 A GPU-accelerated chess [perft](https://www.chessprogramming.org/Perft) calculator using CUDA.
 
-This is a heavily optimized rewrite of the [original perft_gpu](https://github.com/ankan-ban/perft_gpu) project, stripped down to single-GPU mode with a host-driven BFS approach and no transposition tables. The focus is on raw move generation throughput.
+This is a heavily optimized rewrite of the [original perft_gpu](https://github.com/ankan-ban/perft_gpu) project, stripped down to single-GPU mode with a host-driven BFS approach. The focus is on raw move generation throughput, with optional transposition tables for deep perft.
 
 ## Performance
 
-### NVIDIA RTX 6000 Pro (Blackwell, 96GB VRAM)
+### NVIDIA RTX 6000 Pro (Blackwell, 96GB VRAM, TCC mode)
+
+Without transposition tables:
+
+| Position | Depth | Nodes | Time | Speed |
+|---|---|---|---|---|
+| Starting position | 9 | 2,439,530,234,167 | 2.38s | ~1,027 billion nps |
 
 With transposition tables enabled, lossless host TTs, launch depth 8:
 
 | Position | Depth | Nodes | Time | Speed |
 |---|---|---|---|---|
 | Starting position | 9 | 2,439,530,234,167 | 0.29s | ~8,308 billion nps |
-| Starting position | 10 | 69,352,859,712,417 | 3.55s | ~19,554 billion nps |
-| Starting position | 11 | 2,097,651,003,696,806 | 43.5s | ~48,204 billion nps |
-| Starting position | 12 | 62,854,969,236,701,747 | 618s | ~101,767 billion nps |
-| Starting position | 13 | 1,981,066,775,000,396,239 | 9,503s | ~208,476 billion nps |
+| Starting position | 10 | 69,352,859,712,417 | 3.39s | ~20,428 billion nps |
+| Starting position | 11 | 2,097,651,003,696,806 | 41.15s | ~50,979 billion nps |
+| Starting position | 12 | 62,854,969,236,701,747 | 584.6s | ~107,516 billion nps |
+| Starting position | 13 | 1,981,066,775,000,396,239 | 9,126s | ~217,074 billion nps |
 
 ### NVIDIA RTX 4090 (no transposition tables)
 

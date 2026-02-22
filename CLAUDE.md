@@ -17,13 +17,11 @@
   - **All host TTs lossless**: LosslessTT at all CPU depths, proportional sizing by branchingFactor^(maxDepth-d), 4M entry floor
   - **VERBOSE_LOGGING switch** (switches.h, off by default): call size/time histograms, per-BFS-level stats, progress reporting
   - **WIP**: moving ALL logging behind VERBOSE_LOGGING — basic call stats + TT stats still print when off. Need to finish wrapping them. Code does NOT currently build cleanly with VERBOSE_LOGGING=0 due to partially-complete refactor.
-  - **Baseline at LD=8**: perft 10 = 3.55s, 19,554B nps | perft 11 = 43.5s, 48,204B nps | perft 12 = 618s, 101,767B nps | perft 13 = 9503s, 208,476B nps
-- **`async-streams`** (WIP side branch, branched from transposition-tables):
-  - All of the above PLUS CUDA streams + background thread for GPU BFS overlap
-  - 2 streams, split buffer (8GB each), pinned readback memory, stream-local sync
-  - Currently regresses ~3.7% due to per-call std::thread create/join overhead
-  - **Next session TODO**: thread pool (create once at init), separate full-size 16GB buffers,
-    profile with Nsight Systems to identify regression source
+  - **Baseline at LD=8 (TCC)**: perft 10 = 3.39s, 20,428B nps | perft 11 = 41.15s, 50,979B nps | perft 12 = 584.6s, 107,516B nps | perft 13 = 9126s, 217,074B nps
+- **`multi-stream`** (experiment branch, branched from transposition-tables):
+  - 2 worker threads, 2 CUDA streams, root-level even/odd move split
+  - REJECTED: +2-9% regression worsening with depth (SM contention)
+- **`async-streams`** (older WIP side branch, superseded by multi-stream)
 
 ## Architecture
 - Host-driven BFS with CUDA kernels per phase per level
@@ -56,10 +54,10 @@
 - `Magics.cpp` — magic number discovery routines
 
 ## Performance
-- RTX 6000 Pro Blackwell (with TT, LD=8, lossless host TTs + TT[4] 2x):
-  - Startpos perft 9: 0.29s | perft 10: 3.55s, 19,554B nps
-  - perft 11: 43.5s, 48,204B nps | perft 12: 618s, 101,767B nps
-  - perft 13: 9503s (2h 38m), 208,476B nps
+- RTX 6000 Pro Blackwell (with TT, LD=8, lossless host TTs + TT[4] 2x, TCC mode):
+  - Startpos perft 9: 0.29s | perft 10: 3.39s, 20,428B nps
+  - perft 11: 41.15s, 50,979B nps | perft 12: 584.6s, 107,516B nps
+  - perft 13: 9126s (2h 32m), 217,074B nps
   - GPU at 590-600W, 88-89°C, 93-97% util throughout perft 13 (confirmed via nvidia-smi)
 - RTX 6000 Pro Blackwell (no TT baseline): Startpos perft 9 ~1027B nps (2.38s)
 - RTX 4090: Startpos perft 9 ~729B nps (3.34s), Position 2 perft 7 ~1103B nps (0.34s)
@@ -72,7 +70,7 @@ For TT performance benchmarking, only test **startpos perft 10 and perft 11** �
 ```
 - **Run benchmarks SERIALLY** — never run multiple GPU benchmarks in parallel (corrupts measurements)
 - Always do a clean rebuild (`--clean-first`) before benchmarking if any code changed
-- Baseline (LD=8, lossless host TTs + TT[4] 2x): perft 10 ~19,554B nps (3.55s), perft 11 ~48,204B nps (43.5s), perft 12 ~101,767B nps (618s)
+- Baseline (LD=8, lossless host TTs + TT[4] 2x, TCC): perft 10 ~20,428B nps (3.39s), perft 11 ~50,979B nps (41.15s), perft 12 ~107,516B nps (584.6s)
 
 ## OOM Handling (FIXED)
 
@@ -224,10 +222,10 @@ Critical for TT sizing — unique positions grow ~9-10x per ply vs ~28-30x for t
 | Perft | GPU Calls | Avg ms | Max ms | Host TT Hit% | Total Time |
 |-------|-----------|--------|--------|--------------|------------|
 | 9 | 20 | 15.3 | 25.4 | 0% | 0.29s |
-| 10 | 400 | 8.9 | 26.4 | 0% | 3.55s |
-| 11 | 7,602 | 5.9 | 56.4 | 13.9% | 43.5s |
-| 12 | 101,239 | 6.5 | 164.0 | 38.5% | 618s |
-| 13 | ~1.3M | ~6.5 | — | ~50%+ | 9,503s |
+| 10 | 400 | 8.9 | 26.4 | 0% | 3.39s |
+| 11 | 7,602 | 5.9 | 56.4 | 13.9% | 41.15s |
+| 12 | 101,239 | 6.5 | 164.0 | 38.5% | 584.6s |
+| 13 | ~1.3M | ~6.5 | — | ~50%+ | 9,126s |
 - GPU calls track OEIS unique positions at abs depth N-8 (remaining depth = LD)
 - ~29% of perft 12 calls have 0 leaf positions (all device TT hits, ~0.17ms each)
 
@@ -475,24 +473,13 @@ Critical for TT sizing — unique positions grow ~9-10x per ply vs ~28-30x for t
 - 91% of leaf time in calls >10ms (207 calls)
 - Leaf kernel duration: min 0.08ms, avg 8.8ms, max 27.3ms
 
-## Current Architecture (streams + threading, WIP)
-
-### Async GPU BFS (in progress — currently regresses 3.7%)
-- 2 CUDA streams, 2 buffer halves (8GB each from 16GB preallocated)
-- perft_gpu_host_bfs uses explicit stream: all kernels, memsets, CUB use stream param
-- cudaMemcpy → cudaMemcpyAsync + cudaStreamSynchronize (pinned readback memory)
-- cudaDeviceSynchronize → cudaStreamSynchronize (stream-local sync)
-- Background thread submits GPU BFS on stream 1 while main thread works on stream 0
-- Lossless TT store is thread-safe (InterlockedIncrement + CAS for chain prepend)
-- **Current regression cause**: thread create/join overhead (~30µs × 425 calls ≈ 12ms),
-  plus half-buffer may affect bump allocator patterns. Need profiling.
-
-### Next steps for async (next session)
-- Create thread pool once at init (avoid per-call thread create/join overhead)
-- Try with full 16GB buffer for each stream (allocate 2 separate buffers)
-- Profile with Nsight Systems to identify where the regression comes from
-- Consider: the GPU may already be fully saturated (88% leaf kernel), so overlapping
-  two calls may just slow both down via SM contention
+## Multi-Stream Architecture (REJECTED)
+- Branch `multi-stream`: 2 worker threads, 2 CUDA streams, root-level even/odd move split
+- WorkerState struct per worker (buffer, stream, dedupGeneration, effectiveLD, diagnostics)
+- Shared TTs (device XOR lockless + host atomic CAS — already thread-safe)
+- All GPU operations parameterized with stream (kernel launches, memcpy, memset, sync, CUB)
+- **Conclusion**: GPU is already 93-97% utilized — no idle time to fill with a second stream
+- SM contention causes regression that worsens with depth (+2.2% at perft 11, +4.8% at perft 12, ~+9.4% at perft 13)
 
 ## Committed TT Optimizations (beyond base TT)
 
@@ -541,31 +528,35 @@ Critical for TT sizing — unique positions grow ~9-10x per ply vs ~28-30x for t
 - Overhead of cudaMemcpyAsync staging + stream sync exceeds savings from avoiding global sync
 - No true overlap possible with single-threaded CPU — each call still serializes
 
+### Multi-stream root-level parallelism [REJECTED — 2-9% regression, worsens with depth]
+- Branch `multi-stream`: 2 worker threads, 2 CUDA streams, even/odd root move split
+- WorkerState struct per worker (buffer, stream, dedupGeneration, effectiveLD, diagnostics)
+- Shared TTs (device XOR lockless + host atomic CAS — already thread-safe)
+- TCC results: perft 11 +2.2% slower (42.04s vs 41.15s), perft 12 +4.8% slower (612.8s vs 584.6s), perft 13 ~+9.4% slower (~9,983s vs 9126s)
+- Regression worsens with depth — SM contention more impactful as GPU stays saturated longer
+- Nsight Systems (perft 11): leaf kernel +5.2% from SM contention (75% occupancy × 2 = time-sharing)
+- Smaller kernels +24-28% slower (more sensitive to SM availability)
+- GPU already 93-97% utilized — no idle time to fill with a second stream
+- Tested both 2×8GB and 2×16GB buffers — same result
+
 ## Potential Optimization Ideas (untested)
-
-### Non-uniform device TT sizing
-- OEIS data shows unique positions per depth vary enormously (9M at depth 6 vs 85B at depth 10)
-- Current equal-budget-per-depth wastes VRAM on depths with few unique positions
-- Allocate proportional to log(unique_positions) or use a simple large/small split
-
-### Multi-root batching
-- Accumulate multiple root positions, launch single GPU BFS processing all of them
-- Would keep GPU saturated regardless of individual subtree size
-- Requires architectural changes: BFS must track multiple independent root trees
-- Composes with async-streams: batch on stream A while batch B runs
 
 ### Dual-entry replacement (from reference perft_gpu)
 - Two entries per slot: deepest-ever + most-recent
 - Halves effective collision rate, 32 bytes per slot
 
+### Multi-root batching
+- Accumulate multiple root positions, launch single GPU BFS processing all of them
+- Would keep GPU saturated regardless of individual subtree size
+- Requires architectural changes: BFS must track multiple independent root trees
+
 ## Next Session TODO
 1. **Finish VERBOSE_LOGGING refactor**: code doesn't build with VERBOSE_LOGGING=0 — need to finish wrapping all stats variables and collection code behind the switch
-2. **Performance**: perft 12 at 662s, target < 600s
+2. **Performance**: perft 12 at 585s (TCC), target < 550s
    - Multi-root batching: accumulate positions, launch single BFS for all
    - Non-uniform device TT sizing (proportional to unique positions per depth)
    - Profile with Nsight Systems: where is time spent during perft 12?
-3. Async GPU BFS with thread pool (WIP, on side branch `async-streams`)
-4. Consider larger PREALLOCATED_MEMORY_SIZE if LD=9 would help (need >26GB for some calls)
+3. Consider larger PREALLOCATED_MEMORY_SIZE if LD=9 would help (need >26GB for some calls)
 
 ## Perft 16 Feasibility Estimate
 - Growth factor with TT: ~12-13x per depth (vs ~30x raw branching factor)
