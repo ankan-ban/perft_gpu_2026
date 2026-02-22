@@ -3,6 +3,11 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <chrono>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 #include "MoveGeneratorBitboard.h"
 #include "launcher.h"
 #include "utils.h"
@@ -155,6 +160,28 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFa
 
     if (numHostTTs > 0)
     {
+        // Auto-detect: 90% of total system RAM
+        if (g_hostTTBudgetMB <= 0)
+        {
+            uint64 totalRAM = 0;
+#ifdef _WIN32
+            MEMORYSTATUSEX memInfo;
+            memInfo.dwLength = sizeof(memInfo);
+            if (GlobalMemoryStatusEx(&memInfo))
+                totalRAM = memInfo.ullTotalPhys;
+#else
+            long pages = sysconf(_SC_PHYS_PAGES);
+            long pageSize = sysconf(_SC_PAGE_SIZE);
+            if (pages > 0 && pageSize > 0)
+                totalRAM = (uint64)pages * (uint64)pageSize;
+#endif
+            if (totalRAM > 0)
+                g_hostTTBudgetMB = (int)((totalRAM * 9 / 10) / (1024 * 1024));
+            else
+                g_hostTTBudgetMB = 65536;  // fallback
+            printf("Host TT budget: auto %d MB (90%% of %llu MB system RAM)\n",
+                   g_hostTTBudgetMB, (unsigned long long)(totalRAM / (1024 * 1024)));
+        }
         uint64 budgetBytes = (uint64)g_hostTTBudgetMB * 1024 * 1024;
 
         // Compute proportional weights
