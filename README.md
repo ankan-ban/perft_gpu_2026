@@ -4,6 +4,42 @@ A GPU-accelerated chess [perft](https://www.chessprogramming.org/Perft) calculat
 
 This is a heavily optimized rewrite of the [original perft_gpu](https://github.com/ankan-ban/perft_gpu) project, stripped down to single-GPU mode with a host-driven BFS approach. The focus is on raw move generation throughput, with optional transposition tables for deep perft.
 
+## Usage
+
+```
+perft_gpu <fen> <depth> [<launch_depth>] [-cpu] [-nott] [-dtt <MB>] [-htt <MB>]
+```
+
+| Flag | Description |
+|---|---|
+| `<fen>` | FEN string for the position to analyze |
+| `<depth>` | Maximum perft depth |
+| `<launch_depth>` | Manual BFS/CPU switchover depth (auto-detected if omitted) |
+| `-cpu` | Pure CPU mode (no GPU, useful for debugging/comparison) |
+| `-nott` | Disable transposition tables (raw move generation throughput) |
+| `-dtt <MB>` | Override device TT memory budget in MB (default: auto, 95% of free VRAM) |
+| `-htt <MB>` | Override host TT memory budget in MB (default: auto, 90% of system RAM) |
+
+Transposition tables are enabled by default. They provide massive speedups at deeper depths by caching previously computed subtree counts.
+
+### Examples
+
+```bash
+# Starting position, depth 10, with transposition tables (default)
+perft_gpu "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 10
+
+# Kiwipete position, depth 7, without transposition tables
+perft_gpu "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -" 7 -nott
+
+# With explicit launch depth and custom TT budgets
+perft_gpu "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 12 8 -dtt 8192 -htt 32768
+
+# Pure CPU mode (no GPU)
+perft_gpu "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 7 -cpu
+```
+
+The program prints cumulative perft results for depth 1 through the specified maximum depth.
+
 ## Performance
 
 ### NVIDIA RTX 6000 Pro (Blackwell, 96GB VRAM, TCC mode)
@@ -78,21 +114,6 @@ cmake --build build --config Release
 ```
 
 To target a different GPU architecture, edit `CMAKE_CUDA_ARCHITECTURES` in `CMakeLists.txt`.
-
-## Usage
-
-```bash
-# Default: starting position, depth 10
-./build/Release/perft_gpu
-
-# Custom FEN and depth
-./build/Release/perft_gpu "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 9
-
-# With explicit launch depth (controls BFS/DFS switchover)
-./build/Release/perft_gpu "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -" 7 6
-```
-
-The program prints cumulative perft results for depth 1 through the specified maximum depth.
 
 ## File overview
 
