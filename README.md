@@ -104,7 +104,7 @@ The last two levels of the tree are handled by a **fused 2-level leaf kernel**: 
 ## Building
 
 Requirements:
-- CUDA Toolkit (tested with CUDA 12.x)
+- CUDA Toolkit (tested with CUDA 13.1)
 - CMake 3.18+
 - GPU with compute capability 8.0+ (e.g., RTX 3090, RTX 4090, RTX 6000 Blackwell)
 
