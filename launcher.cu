@@ -16,6 +16,7 @@
 
 // GPU memory buffer for BFS tree storage (allocated in initGPU, freed in main)
 void *preAllocatedBufferHost;
+uint64 g_preAllocatedMemorySize = 0;
 
 // Global TT arrays
 TTTable deviceTTs[MAX_TT_DEPTH];
@@ -60,16 +61,24 @@ void initGPU(int gpu)
     cudaMemGetInfo(&free, &total);
     printf("\ngpu: %d, memory total: %llu, free: %llu\n", gpu, (unsigned long long)total, (unsigned long long)free);
 
-    // allocate the preallocated buffer for BFS tree storage
-    cudaStatus = cudaMalloc(&preAllocatedBufferHost, PREALLOCATED_MEMORY_SIZE);
+    // BFS buffer: with TT, use min(16GB, 33% of device mem); without TT, min(16GB, 95%)
+#if USE_TT
+    uint64 target = (uint64)(total * 33 / 100);
+#else
+    uint64 target = (uint64)(total * 95 / 100);
+#endif
+    uint64 cap = PREALLOCATED_MEMORY_SIZE;
+    g_preAllocatedMemorySize = (target < cap) ? target : cap;
+
+    cudaStatus = cudaMalloc(&preAllocatedBufferHost, g_preAllocatedMemorySize);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "error in malloc for preAllocatedBuffer, error desc: %s\n", cudaGetErrorString(cudaStatus));
         exit(1);
     }
-    else
-    {
-        printf("Allocated preAllocatedBuffer of %llu bytes\n", (unsigned long long)PREALLOCATED_MEMORY_SIZE);
-    }
+    printf("Allocated BFS buffer: %llu MB (%.0f%% of %llu MB total)\n",
+           (unsigned long long)(g_preAllocatedMemorySize / (1024*1024)),
+           100.0 * g_preAllocatedMemorySize / total,
+           (unsigned long long)(total / (1024*1024)));
 }
 
 // -------------------------------------------------------------------------
@@ -116,22 +125,44 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFa
         }
         else
         {
-            // Auto-size: use 75% of free VRAM for device TTs
+            // Auto-size: use 95% of free VRAM (after BFS buffer) for device TTs
             size_t freeMem = 0, totalMem = 0;
             cudaMemGetInfo(&freeMem, &totalMem);
-            budgetBytes = (uint64)(freeMem * 3 / 4);
-            printf("Auto device TT budget: %llu MB (75%% of %llu MB free)\n",
+            budgetBytes = (uint64)(freeMem * 95 / 100);
+            printf("Auto device TT budget: %llu MB (95%% of %llu MB free)\n",
                    (unsigned long long)(budgetBytes / (1024*1024)),
                    (unsigned long long)(freeMem / (1024*1024)));
         }
 
+        // Pick two power-of-2 entry counts: smallPow2 fits all TTs evenly,
+        // largePow2 = 2x for upgrading shallow levels with leftover budget.
         uint64 perTableBytes = budgetBytes / numDeviceTTs;
-        uint64 entriesPerTable = floorPow2(perTableBytes / sizeof(TTEntry));
-        if (entriesPerTable < 1024) entriesPerTable = 1024;
+        uint64 smallPow2 = floorPow2(perTableBytes / sizeof(TTEntry));
+        if (smallPow2 < 1024) smallPow2 = 1024;
+        uint64 largePow2 = smallPow2 * 2;
+
+        // Determine which depths get the larger allocation.
+        // Start with all at smallPow2, then upgrade from depth 3 upward.
+        uint64 baseTotal = (uint64)numDeviceTTs * smallPow2 * sizeof(TTEntry);
+        uint64 remaining = (baseTotal <= budgetBytes) ? budgetBytes - baseTotal : 0;
+        uint64 upgradeBytes = (largePow2 - smallPow2) * sizeof(TTEntry);
+
+        uint64 entryCount[MAX_TT_DEPTH];
+        memset(entryCount, 0, sizeof(entryCount));
+        for (int d = 3; d < maxLaunchDepth && d < MAX_TT_DEPTH; d++)
+            entryCount[d] = smallPow2;
+
+        // Upgrade shallow depths first (d=3, 4, 5, ...) while budget allows
+        for (int d = 3; d < maxLaunchDepth && d < MAX_TT_DEPTH; d++)
+        {
+            if (remaining < upgradeBytes) break;
+            entryCount[d] = largePow2;
+            remaining -= upgradeBytes;
+        }
 
         for (int d = 3; d < maxLaunchDepth && d < MAX_TT_DEPTH; d++)
         {
-            uint64 entries = (d >= 3 && d <= 5) ? entriesPerTable * 2 : entriesPerTable;
+            uint64 entries = entryCount[d];
 
             cudaError_t err = cudaMalloc(&deviceTTs[d].entries, entries * sizeof(TTEntry));
             if (err != cudaSuccess)
@@ -291,8 +322,8 @@ void printTTStats()
     {
         printf("  Peak BFS memory: %llu MB / %llu MB (%.1f%%)\n",
                (unsigned long long)(g_iterPeakBfsMemory / (1024*1024)),
-               (unsigned long long)(PREALLOCATED_MEMORY_SIZE / (1024*1024)),
-               100.0 * g_iterPeakBfsMemory / PREALLOCATED_MEMORY_SIZE);
+               (unsigned long long)(g_preAllocatedMemorySize / (1024*1024)),
+               100.0 * g_iterPeakBfsMemory / g_preAllocatedMemorySize);
     }
     // Detailed call diagnostics (only for iterations with significant GPU calls)
     if (g_gpuCallCount > 10)
@@ -422,7 +453,7 @@ uint32 estimateLaunchDepth(QuadBitBoard *pos, GameState *gs, uint8 rootColor, fl
     // With the fused 2-level leaf kernel, the last BFS level's huge move/index
     // arrays are eliminated. This effectively multiplies the memory budget by
     // the branching factor, allowing a higher launch depth (fewer CPU calls).
-    float memLimit = (float)PREALLOCATED_MEMORY_SIZE / 2.0f * branchingFactor;
+    float memLimit = (float)g_preAllocatedMemorySize / 2.0f * branchingFactor;
 
     // estimated depth is log of memLimit in base 'branchingFactor'
     uint32 depth = (uint32)(log(memLimit) / log(branchingFactor));
@@ -591,7 +622,7 @@ void perftLauncher(QuadBitBoard *pos, GameState *gs, uint8 rootColor, uint32 dep
     Timer timer;
     timer.start();
 
-    uint64 result = perft_cpu_recurse(pos, gs, rootColor, depth, launchDepth, rootHash, preAllocatedBufferHost, PREALLOCATED_MEMORY_SIZE);
+    uint64 result = perft_cpu_recurse(pos, gs, rootColor, depth, launchDepth, rootHash, preAllocatedBufferHost, g_preAllocatedMemorySize);
 
     timer.stop();
     double seconds = timer.elapsed();

@@ -4,6 +4,7 @@
 - Push to `https://github.com/ankan-ban/perft_gpu_2026` (NOT perft_gpu)
 - Never add `Co-Authored-By` lines to commit messages
 - Always do clean rebuilds (`--clean-first`) after editing headers - NVCC doesn't reliably track transitive header dependencies
+- **Never commit or push until the user has manually reviewed/tested and given explicit go-ahead**
 
 ## Branch Status
 - **`transposition-tables`** (main working branch, **dirty — uncommitted OOM fix + logging work**):

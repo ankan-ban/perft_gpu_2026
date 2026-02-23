@@ -4,6 +4,7 @@
 
 // GPU memory buffer for BFS tree storage
 extern void *preAllocatedBufferHost;
+extern uint64 g_preAllocatedMemorySize;
 
 // Initialization
 void initGPU(int gpu);
