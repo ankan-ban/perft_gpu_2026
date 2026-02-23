@@ -13,6 +13,7 @@
 #include "utils.h"
 #include "zobrist.h"
 #include "tt.h"
+#include "uint128.h"
 
 // GPU memory buffer for BFS tree storage (allocated in initGPU, freed in main)
 void *preAllocatedBufferHost;
@@ -464,7 +465,9 @@ int getEffectiveLD() { return g_effectiveLD; }
 void setEffectiveLD(int ld) { g_effectiveLD = ld; }
 
 // Serial CPU recursion at top levels, launching GPU BFS at launchDepth
-static uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, int depth, int launchDepth, Hash128 hash, void *gpuBuffer, size_t bufferSize)
+// Returns uint128 to handle overflow at deep perft (15+) where summing
+// many uint64 GPU results exceeds 64-bit range.
+static uint128 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, int depth, int launchDepth, Hash128 hash, void *gpuBuffer, size_t bufferSize)
 {
     if (g_useTT && depth >= 2)
     {
@@ -474,14 +477,14 @@ static uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, i
 #if VERBOSE_LOGGING
             g_hostTTHits++;
 #endif
-            return ttCount;
+            return uint128(ttCount);
         }
 #if VERBOSE_LOGGING
         g_hostTTMisses++;
 #endif
     }
 
-    uint64 count;
+    uint128 count;
     bool needCpuFallback = false;
 
     if (depth <= g_effectiveLD)
@@ -596,9 +599,9 @@ static uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, i
         }
     }
 
-    if (g_useTT && depth >= 2)
+    if (g_useTT && depth >= 2 && count.hi == 0)
     {
-        losslessStore(hostLosslessTTs[depth], hash, count);
+        losslessStore(hostLosslessTTs[depth], hash, count.lo);
     }
 
     return count;
@@ -612,14 +615,16 @@ void perftLauncher(QuadBitBoard *pos, GameState *gs, uint8 rootColor, uint32 dep
     Timer timer;
     timer.start();
 
-    uint64 result = perft_cpu_recurse(pos, gs, rootColor, depth, launchDepth, rootHash, preAllocatedBufferHost, g_preAllocatedMemorySize);
+    uint128 result = perft_cpu_recurse(pos, gs, rootColor, depth, launchDepth, rootHash, preAllocatedBufferHost, g_preAllocatedMemorySize);
 
     timer.stop();
     double seconds = timer.elapsed();
 
-    printf("\nPerft(%02d): %llu, time: %g seconds", depth, (unsigned long long)result, seconds);
+    char buf[48];
+    result.toDecimalString(buf, sizeof(buf));
+    printf("\nPerft(%02d): %s, time: %g seconds", depth, buf, seconds);
     if (seconds > 0)
-        printf(", nps: %llu", (unsigned long long)((double)result / seconds));
+        printf(", nps: %llu", (unsigned long long)(result.toDouble() / seconds));
     printf("\n");
     fflush(stdout);
 }

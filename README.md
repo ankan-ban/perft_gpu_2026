@@ -119,15 +119,19 @@ To target a different GPU architecture, edit `CMAKE_CUDA_ARCHITECTURES` in `CMak
 
 | File | Description |
 |---|---|
-| `perft.cu` | Entry point, GPU init, FEN parsing, main loop |
-| `perft_kernels.cu` | GPU kernels, host-driven BFS, fused 2-level leaf |
-| `launcher.cu` | GPU initialization, launch depth estimation, CPU perft fallback |
-| `MoveGeneratorBitboard.h` | Bitboard-based legal move generation |
-| `chess.h` | Board representation (`QuadBitBoard`, `GameState`), move structures |
-| `switches.h` | Compile-time constants (`BLOCK_SIZE`, memory sizes, lookup table options) |
-| `utils.h` / `util.cpp` | Board display, FEN parsing, timer utilities |
+| `perft.cu` | Entry point, CLI parsing, flag handling |
+| `launcher.cu` / `launcher.h` | GPU init, launch depth estimation, GPU+CPU perft launchers, TT allocation, OOM fallback |
+| `perft_kernels.cu` | GPU kernels, host-driven BFS, upsweep, move generator init |
+| `MoveGeneratorBitboard.h` | Bitboard-based legal move generation (~1950 lines) |
+| `chess.h` | Core data structures (`QuadBitBoard`, `GameState`, `CMove`, magic entries) |
+| `switches.h` | Compile-time flags (`BLOCK_SIZE`, `MIN_BLOCKS_PER_MP`, `HASH_IN_LEAF_KERNEL`, etc.) |
+| `tt.h` | Transposition table structures (`TTEntry`, `TTTable`, `LosslessTT`, probe/store) |
+| `zobrist.h` / `zobrist.cpp` | 128-bit Zobrist hashing |
+| `uint128.h` | 128-bit unsigned integer for deep perft accumulation |
+| `utils.h` / `util.cpp` | FEN parsing, board display, Timer class |
 | `GlobalVars.cpp` | Magic tables, attack tables |
 | `Magics.cpp` | Magic number generation for sliding piece attacks |
+| `randoms.cpp` | Pre-generated random numbers for Zobrist hashing |
 
 ## License
 

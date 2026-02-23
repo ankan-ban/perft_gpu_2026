@@ -39,6 +39,8 @@ struct uint128
     bool operator==(const uint128 &other) const { return lo == other.lo && hi == other.hi; }
     bool operator!=(const uint128 &other) const { return !(*this == other); }
 
+    double toDouble() const { return (double)hi * 18446744073709551616.0 + (double)lo; }
+
     // Convert to decimal string for printing
     // Uses repeated division by 10^9 for efficiency
     void toDecimalString(char *buf, int bufSize) const
