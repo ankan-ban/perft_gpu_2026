@@ -7,14 +7,14 @@ This is a heavily optimized rewrite of the [original perft_gpu](https://github.c
 ## Usage
 
 ```
-perft_gpu <fen> <depth> [<launch_depth>] [-cpu] [-nott] [-dtt <MB>] [-htt <MB>]
+perft_gpu <fen> <depth> [-ld <N>] [-cpu] [-nott] [-dtt <MB>] [-htt <MB>]
 ```
 
 | Flag | Description |
 |---|---|
 | `<fen>` | FEN string for the position to analyze |
 | `<depth>` | Maximum perft depth |
-| `<launch_depth>` | Manual BFS/CPU switchover depth (auto-detected if omitted) |
+| `-ld <N>` | Manual BFS/CPU switchover depth (auto-detected if omitted) |
 | `-cpu` | Pure CPU mode (no GPU, useful for debugging/comparison) |
 | `-nott` | Disable transposition tables (raw move generation throughput) |
 | `-dtt <MB>` | Override device TT memory budget in MB (default: auto, 95% of free VRAM) |
@@ -32,7 +32,7 @@ perft_gpu "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 10
 perft_gpu "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -" 7 -nott
 
 # With explicit launch depth and custom TT budgets
-perft_gpu "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 12 8 -dtt 8192 -htt 32768
+perft_gpu "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 12 -ld 8 -dtt 8192 -htt 32768
 
 # Pure CPU mode (no GPU)
 perft_gpu "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 7 -cpu

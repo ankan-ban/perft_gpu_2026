@@ -7,6 +7,9 @@
 extern int g_deviceTTBudgetMB;
 extern int g_hostTTBudgetMB;
 
+// Launch depth override (-ld flag, 0 = auto)
+static int g_launchDepthOverride = 0;
+
 int main(int argc, char *argv[])
 {
     // Parse flags from anywhere in args
@@ -23,6 +26,12 @@ int main(int argc, char *argv[])
         {
             g_useTT = false;
             consumed = true;
+        }
+        else if (strcmp(argv[i], "-ld") == 0 && i + 1 < argc)
+        {
+            g_launchDepthOverride = atoi(argv[i + 1]);
+            for (int j = i; j < argc - 2; j++) argv[j] = argv[j + 2];
+            argc -= 2; i--; continue;
         }
         else if (strcmp(argv[i], "-dtt") == 0 && i + 1 < argc)
         {
@@ -75,7 +84,7 @@ int main(int argc, char *argv[])
     }
     else
     {
-        printf("\nUsage: perft_gpu <fen> <depth> [<launchdepth>] [-cpu] [-nott]\n");
+        printf("\nUsage: perft_gpu <fen> <depth> [-ld <N>] [-cpu] [-nott]\n");
         printf("\nAs no parameters were provided... running default test\n");
     }
 
@@ -115,9 +124,9 @@ int main(int argc, char *argv[])
         if (launchDepth < 6)
             launchDepth = 6;
 
-        if (argc >= 4)
+        if (g_launchDepthOverride > 0)
         {
-            launchDepth = atoi(argv[3]);
+            launchDepth = g_launchDepthOverride;
         }
 
         if ((uint32)maxDepth < launchDepth)
