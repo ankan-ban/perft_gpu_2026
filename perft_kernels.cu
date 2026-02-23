@@ -628,9 +628,6 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
     // Perft counter on GPU
     uint64 *d_perftCounter = alloc.alloc<uint64>(1);
     cudaMemset(d_perftCounter, 0, sizeof(uint64));
-    // Pre-allocate partition array for merge-path interval expand
-    const int maxPartitions = 500000;
-    int *d_partitions = alloc.alloc<int>(maxPartitions);
     QuadBitBoard *d_prevBoards = d_rootPos;
     GameState *d_prevStates = d_rootState;
     Hash128 *d_prevHashes = d_rootHash;
@@ -757,7 +754,8 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
         int mergeItems = nextLevelCount + currentCount;
         int numExpandCTAs = (mergeItems + IE_NV - 1) / IE_NV;
         int numPartitions = numExpandCTAs + 1;
-        if (numPartitions > maxPartitions)
+        int *d_partitions = alloc.alloc<int>(numPartitions);
+        if (!d_partitions)
         {
             cudaDeviceSynchronize();
             g_lastBfsOom = true;
