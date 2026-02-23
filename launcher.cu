@@ -18,6 +18,9 @@
 void *preAllocatedBufferHost;
 uint64 g_preAllocatedMemorySize = 0;
 
+// Runtime TT toggle (default: enabled, disable with -nott CLI flag)
+bool g_useTT = true;
+
 // Global TT arrays
 TTTable deviceTTs[MAX_TT_DEPTH];
 LosslessTT hostLosslessTTs[MAX_TT_DEPTH];
@@ -62,11 +65,7 @@ void initGPU(int gpu)
     printf("\ngpu: %d, memory total: %llu, free: %llu\n", gpu, (unsigned long long)total, (unsigned long long)free);
 
     // BFS buffer: with TT, use min(16GB, 33% of device mem); without TT, min(16GB, 95%)
-#if USE_TT
-    uint64 target = (uint64)(total * 33 / 100);
-#else
-    uint64 target = (uint64)(total * 95 / 100);
-#endif
+    uint64 target = g_useTT ? (uint64)(total * 33 / 100) : (uint64)(total * 95 / 100);
     uint64 cap = PREALLOCATED_MEMORY_SIZE;
     g_preAllocatedMemorySize = (target < cap) ? target : cap;
 
@@ -104,7 +103,8 @@ int g_hostTTBudgetMB = HOST_TT_BUDGET_MB;
 
 void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFactor)
 {
-#if USE_TT
+    if (!g_useTT) return;
+
     memset(deviceTTs, 0, sizeof(deviceTTs));
     memset(hostLosslessTTs, 0, sizeof(hostLosslessTTs));
 
@@ -266,7 +266,6 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFa
 
     printf("\n");
     fflush(stdout);
-#endif
 }
 
 void resetCallStats()
@@ -381,42 +380,40 @@ void printTTStats()
             }
         }
     }
-#if USE_TT
-    // Lossless host TT fill levels
-    for (int d = 0; d < MAX_TT_DEPTH; d++)
+    if (g_useTT)
     {
-        if (!hostLosslessTTs[d].pool) continue;
-        int32_t used = hostLosslessTTs[d].nextFree;
-        int32_t capacity = hostLosslessTTs[d].poolCapacity;
-        double pct = capacity > 0 ? 100.0 * used / capacity : 0.0;
-        const char *usedUnit = ""; int32_t usedVal = used;
-        if (used >= 1024*1024) { usedUnit = "M"; usedVal = used / (1024*1024); }
-        else if (used >= 1024) { usedUnit = "K"; usedVal = used / 1024; }
-        printf("  Host TT[%d]: %d%s / %dM entries (%.2f%%)",
-               d, usedVal, usedUnit, capacity / (1024*1024), pct);
-        if (used >= capacity)
-            printf(" *** FULL - new stores dropped! ***");
-        printf("\n");
+        // Lossless host TT fill levels
+        for (int d = 0; d < MAX_TT_DEPTH; d++)
+        {
+            if (!hostLosslessTTs[d].pool) continue;
+            int32_t used = hostLosslessTTs[d].nextFree;
+            int32_t capacity = hostLosslessTTs[d].poolCapacity;
+            double pct = capacity > 0 ? 100.0 * used / capacity : 0.0;
+            const char *usedUnit = ""; int32_t usedVal = used;
+            if (used >= 1024*1024) { usedUnit = "M"; usedVal = used / (1024*1024); }
+            else if (used >= 1024) { usedUnit = "K"; usedVal = used / 1024; }
+            printf("  Host TT[%d]: %d%s / %dM entries (%.2f%%)",
+                   d, usedVal, usedUnit, capacity / (1024*1024), pct);
+            if (used >= capacity)
+                printf(" *** FULL - new stores dropped! ***");
+            printf("\n");
+        }
     }
-#endif // USE_TT
     fflush(stdout);
 #endif // VERBOSE_LOGGING
 }
 
 void clearDeviceTTs()
 {
-#if USE_TT
     for (int d = 0; d < MAX_TT_DEPTH; d++)
     {
         if (deviceTTs[d].entries)
             cudaMemset(deviceTTs[d].entries, 0, (deviceTTs[d].mask + 1) * sizeof(TTEntry));
     }
-#endif
 }
 
 void freeTT()
 {
-#if USE_TT
     for (int d = 0; d < MAX_TT_DEPTH; d++)
     {
         if (deviceTTs[d].entries)
@@ -428,7 +425,6 @@ void freeTT()
         free(hostLosslessTTs[d].pool);
         memset(&hostLosslessTTs[d], 0, sizeof(LosslessTT));
     }
-#endif
 }
 
 uint32 estimateLaunchDepth(QuadBitBoard *pos, GameState *gs, uint8 rootColor, float *outBranchingFactor)
@@ -470,9 +466,7 @@ void setEffectiveLD(int ld) { g_effectiveLD = ld; }
 // Serial CPU recursion at top levels, launching GPU BFS at launchDepth
 static uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, int depth, int launchDepth, Hash128 hash, void *gpuBuffer, size_t bufferSize)
 {
-#if USE_TT
-    // Probe host TT (all depths use lossless tables)
-    if (depth >= 2)
+    if (g_useTT && depth >= 2)
     {
         uint64 ttCount;
         if (losslessProbe(hostLosslessTTs[depth], hash, &ttCount))
@@ -486,7 +480,6 @@ static uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, i
         g_hostTTMisses++;
 #endif
     }
-#endif
 
     uint64 count;
     bool needCpuFallback = false;
@@ -603,13 +596,10 @@ static uint64 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, i
         }
     }
 
-#if USE_TT
-    // Store in host TT (all depths use lossless tables)
-    if (depth >= 2)
+    if (g_useTT && depth >= 2)
     {
         losslessStore(hostLosslessTTs[depth], hash, count);
     }
-#endif
 
     return count;
 }
@@ -663,11 +653,12 @@ static uint64 perft_cpu(QuadBitBoard *pos, GameState *gs, uint32 depth, Hash128 
     if (depth == 1)
         return MoveGeneratorBitboard::countMoves<chance>(pos, gs);
 
-#if USE_TT
-    uint64 ttCount;
-    if (losslessProbe(hostLosslessTTs[depth], hash, &ttCount))
-        return ttCount;
-#endif
+    if (g_useTT)
+    {
+        uint64 ttCount;
+        if (losslessProbe(hostLosslessTTs[depth], hash, &ttCount))
+            return ttCount;
+    }
 
     CMove moves[MAX_MOVES];
     int nMoves = MoveGeneratorBitboard::generateMoves<chance>(pos, gs, moves);
@@ -691,9 +682,8 @@ static uint64 perft_cpu(QuadBitBoard *pos, GameState *gs, uint32 depth, Hash128 
         count += perft_cpu<!chance>(&childPos, &childGs, depth - 1, childHash);
     }
 
-#if USE_TT
-    losslessStore(hostLosslessTTs[depth], hash, count);
-#endif
+    if (g_useTT)
+        losslessStore(hostLosslessTTs[depth], hash, count);
 
     return count;
 }

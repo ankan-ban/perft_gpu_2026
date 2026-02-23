@@ -19,6 +19,11 @@ int main(int argc, char *argv[])
             cpuMode = true;
             consumed = true;
         }
+        else if (strcmp(argv[i], "-nott") == 0)
+        {
+            g_useTT = false;
+            consumed = true;
+        }
         else if (strcmp(argv[i], "-dtt") == 0 && i + 1 < argc)
         {
             g_deviceTTBudgetMB = atoi(argv[i + 1]);
@@ -70,7 +75,7 @@ int main(int argc, char *argv[])
     }
     else
     {
-        printf("\nUsage: perft_gpu <fen> <depth> [<launchdepth>] [-cpu]\n");
+        printf("\nUsage: perft_gpu <fen> <depth> [<launchdepth>] [-cpu] [-nott]\n");
         printf("\nAs no parameters were provided... running default test\n");
     }
 

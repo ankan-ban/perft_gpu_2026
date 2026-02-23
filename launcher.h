@@ -6,6 +6,9 @@
 extern void *preAllocatedBufferHost;
 extern uint64 g_preAllocatedMemorySize;
 
+// Runtime TT toggle (default: enabled, disable with -nott CLI flag)
+extern bool g_useTT;
+
 // Initialization
 void initGPU(int gpu);
 void initMoveGen();
