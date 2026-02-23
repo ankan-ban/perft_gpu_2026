@@ -7,18 +7,18 @@ This is a heavily optimized rewrite of the [original perft_gpu](https://github.c
 ## Usage
 
 ```
-perft_gpu <fen> <depth> [-ld <N>] [-cpu] [-nott] [-dtt <MB>] [-htt <MB>]
+perft_gpu <fen> <depth> [-nott] [-dtt <MB>] [-htt <MB>] [-ld <N>] [-cpu]
 ```
 
 | Flag | Description |
 |---|---|
 | `<fen>` | FEN string for the position to analyze |
 | `<depth>` | Maximum perft depth |
-| `-ld <N>` | Manual BFS/CPU switchover depth (auto-detected if omitted) |
-| `-cpu` | Pure CPU mode (no GPU, useful for debugging/comparison) |
 | `-nott` | Disable transposition tables (raw move generation throughput) |
 | `-dtt <MB>` | Override device TT memory budget in MB (default: auto, 95% of free VRAM) |
 | `-htt <MB>` | Override host TT memory budget in MB (default: auto, 90% of system RAM) |
+| `-ld <N>` | Manual BFS/CPU switchover depth (auto-detected if omitted) |
+| `-cpu` | Pure CPU mode (no GPU, useful for debugging/comparison) |
 
 Transposition tables are enabled by default. They provide massive speedups at deeper depths by caching previously computed subtree counts.
 

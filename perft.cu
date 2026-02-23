@@ -84,7 +84,7 @@ int main(int argc, char *argv[])
     }
     else
     {
-        printf("\nUsage: perft_gpu <fen> <depth> [-ld <N>] [-cpu] [-nott]\n");
+        printf("\nUsage: perft_gpu <fen> <depth> [-nott] [-dtt <MB>] [-htt <MB>] [-ld <N>] [-cpu]\n");
         printf("\nAs no parameters were provided... running default test\n");
     }
 
