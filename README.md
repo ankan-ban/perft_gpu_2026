@@ -80,6 +80,25 @@ With transposition tables enabled, lossless host TTs, launch depth 8:
 | Starting position | 10 | 69,352,859,712,417 | 5.71s | ~12,149 billion nps |
 | Starting position | 11 | 2,097,651,003,696,806 | 78.95s | ~26,569 billion nps |
 
+### NVIDIA DGX Spark (GB10 Grace Blackwell, 128GB unified LPDDR5x)
+
+Without transposition tables:
+
+| Position | Depth | Nodes | Time | Speed |
+|---|---|---|---|---|
+| Starting position | 8 | 84,998,978,956 | 0.356s | ~239 billion nps |
+| Starting position | 9 | 2,439,530,234,167 | 9.38s | ~260 billion nps |
+| [Position 2](https://www.chessprogramming.org/Perft_Results#Position_2) (Kiwipete) | 7 | 374,190,009,323 | 0.86s | ~435 billion nps |
+
+With transposition tables enabled, lossless host TTs, launch depth 8:
+
+| Position | Depth | Nodes | Time | Speed |
+|---|---|---|---|---|
+| Starting position | 8 | 84,998,978,956 | 0.112s | ~759 billion nps |
+| Starting position | 9 | 2,439,530,234,167 | 1.38s | ~1,763 billion nps |
+| Starting position | 10 | 69,352,859,712,417 | 16.71s | ~4,151 billion nps |
+| Starting position | 11 | 2,097,651,003,696,806 | 214.88s | ~9,762 billion nps |
+
 ## How it works
 
 The perft tree is explored using breadth-first search driven from the host. At each BFS level, CUDA kernels expand all positions at the current depth in parallel:
