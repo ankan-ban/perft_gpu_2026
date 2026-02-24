@@ -146,17 +146,29 @@ inline void losslessStore(LosslessTT &tt, Hash128 hash, uint64 count)
 {
     if (!tt.buckets) return;
     // Atomic bump allocator — safe for concurrent stores from multiple threads
+#ifdef _MSC_VER
     long newIdx = _InterlockedIncrement((volatile long *)&tt.nextFree) - 1;
+#else
+    int32_t newIdx = __atomic_fetch_add(&tt.nextFree, 1, __ATOMIC_SEQ_CST);
+#endif
     if (newIdx >= tt.poolCapacity) return;
     uint64 bucket = hash.lo & tt.bucketMask;
     tt.pool[newIdx].hashKey = hash.hi ^ hash.lo;
     tt.pool[newIdx].count = count;
     // CAS loop to prepend to bucket chain
+#ifdef _MSC_VER
     long oldHead;
     do {
         oldHead = *(volatile long *)&tt.buckets[bucket];
         tt.pool[newIdx].next = (int32_t)oldHead;
     } while (_InterlockedCompareExchange((volatile long *)&tt.buckets[bucket], (long)newIdx, oldHead) != oldHead);
+#else
+    int32_t oldHead;
+    do {
+        oldHead = __atomic_load_n(&tt.buckets[bucket], __ATOMIC_SEQ_CST);
+        tt.pool[newIdx].next = oldHead;
+    } while (!__atomic_compare_exchange_n(&tt.buckets[bucket], &oldHead, newIdx, true, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+#endif
 }
 
 // -------------------------------------------------------------------------

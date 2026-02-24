@@ -98,3 +98,6 @@ perft_gpu <fen> <depth> [-nott] [-dtt <MB>] [-htt <MB>] [-ld <N>] [-cpu]
 | Cached ~b inversions | Neutral | Prevents LOP3.LUT fusion |
 | Branchless castling | Neutral | Already branchless via predication |
 | Bulk pawn gen in generateMoves | Neutral | Per-pawn loop already efficient for from/to pairs |
+| Multithreaded CPU recursion (16 threads) | Neutral (+1.4%) | GPU calls serialized by mutex; not enough CPU work to overlap at perft 11 |
+| Batched GPU launches (depth LD+1) | -2.3% at perft 11 | Reduces ~18K GPU calls to ~600; modest win, slight regression at perft 10 |
+| 2-way set-associative device TT | Neutral (+0.8%) | Device TTs already large enough; low collision rate; extra probe load overhead |

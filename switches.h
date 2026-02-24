@@ -37,9 +37,9 @@
 #endif
 
 #ifndef CPU_FORCE_INLINE
-#ifdef __linux__
-    #define CPU_FORCE_INLINE inline
-#else
+#ifdef _MSC_VER
     #define CPU_FORCE_INLINE __forceinline
+#else
+    #define CPU_FORCE_INLINE inline
 #endif
 #endif

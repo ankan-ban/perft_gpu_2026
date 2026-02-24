@@ -2,12 +2,15 @@
 
 #include "chess.h"
 
-#ifdef __linux__ 
-    #include <x86intrin.h>
-    #define CPU_FORCE_INLINE inline
-#else
+#ifdef _MSC_VER
     #include <intrin.h>
-    #define CPU_FORCE_INLINE __forceinline
+    #ifndef CPU_FORCE_INLINE
+        #define CPU_FORCE_INLINE __forceinline
+    #endif
+#else
+    #ifndef CPU_FORCE_INLINE
+        #define CPU_FORCE_INLINE inline
+    #endif
 #endif
 
 #include <time.h>
@@ -68,14 +71,10 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint8 popCount(uint64 x)
 {
 #ifdef __CUDA_ARCH__
     return __popcll(x);
-#elif defined(_WIN64)
-    return (uint8)_mm_popcnt_u64(x);
-#elif defined(__linux__)
-    return (uint8)_mm_popcnt_u64(x);
+#elif defined(_MSC_VER)
+    return (uint8)__popcnt64(x);
 #else
-    uint32 lo = (uint32)  x;
-    uint32 hi = (uint32) (x >> 32);
-    return _mm_popcnt_u32(lo) + _mm_popcnt_u32(hi);
+    return (uint8)__builtin_popcountll(x);
 #endif
 }
 
@@ -86,27 +85,13 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE uint8 bitScan(uint64 x)
 #ifdef __CUDA_ARCH__
     // __ffsll(x) returns position from 1 to 64 instead of 0 to 63
     return __ffsll(x) - 1;
-#elif _WIN64
-   unsigned long index;
-   assert (x != 0);
-   _BitScanForward64(&index, x);
-   return (uint8) index;   
-#elif __linux__
-    return __builtin_ffsll(x) - 1;
+#elif defined(_MSC_VER)
+    unsigned long index;
+    assert (x != 0);
+    _BitScanForward64(&index, x);
+    return (uint8) index;
 #else
-    uint32 lo = (uint32)  x;
-    uint32 hi = (uint32) (x >> 32);
-    unsigned long id;
-
-    if (lo)
-        _BitScanForward(&id, lo);
-    else
-    {
-        _BitScanForward(&id, hi);
-        id += 32;
-    }
-
-    return (uint8) id;
+    return (uint8)__builtin_ctzll(x);
 #endif
 }
 
