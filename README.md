@@ -124,7 +124,7 @@ To target a different GPU architecture, edit `CMAKE_CUDA_ARCHITECTURES` in `CMak
 | `perft_kernels.cu` | GPU kernels, host-driven BFS, upsweep, move generator init |
 | `MoveGeneratorBitboard.h` | Bitboard-based legal move generation (~1950 lines) |
 | `chess.h` | Core data structures (`QuadBitBoard`, `GameState`, `CMove`, magic entries) |
-| `switches.h` | Compile-time flags (`BLOCK_SIZE`, `MIN_BLOCKS_PER_MP`, `HASH_IN_LEAF_KERNEL`, etc.) |
+| `switches.h` | Compile-time flags (`BLOCK_SIZE`, `MIN_BLOCKS_PER_MP`, TT budgets, etc.) |
 | `tt.h` | Transposition table structures (`TTEntry`, `TTTable`, `LosslessTT`, probe/store) |
 | `zobrist.h` / `zobrist.cpp` | 128-bit Zobrist hashing |
 | `uint128.h` | 128-bit unsigned integer for deep perft accumulation |

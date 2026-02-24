@@ -111,8 +111,7 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFa
 
     // Device TTs: depths 3 through maxLaunchDepth-1 (GPU BFS levels)
     // Allocate for the widest possible LD range to support dynamic LD increase.
-    // Depth 2 is unused: bfsMinLevel=3 means no BFS level probes TT[2],
-    // and HASH_IN_LEAF_KERNEL=0 means the fused leaf doesn't probe it either.
+    // Depth 2 is unused: bfsMinLevel=3 means no BFS level probes TT[2].
     int numDeviceTTs = 0;
     for (int d = 3; d < maxLaunchDepth && d < MAX_TT_DEPTH; d++)
         numDeviceTTs++;

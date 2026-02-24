@@ -316,7 +316,6 @@ __global__ void generate_moves_kernel(QuadBitBoard *positions, GameState *states
 __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 #endif
 __global__ void makeMove_and_perft_leaf_kernel(QuadBitBoard *positions, GameState *states,
-                                                Hash128 *hashes,
                                                 int *indices, CMove *moves,
                                                 uint64 *globalPerftCounter,
                                                 uint64 *perThreadCounts,
@@ -382,11 +381,9 @@ __global__ void perft_2level_from_board_kernel(QuadBitBoard *boards, GameState *
 // -------------------------------------------------------------------------
 __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *states,
-                                          Hash128 *hashes,
                                           int *indices, CMove *moves,
                                           uint64 *globalPerftCounter,
                                           uint64 *perThreadCounts,
-                                          TTTable leafTT,
                                           int nThreads, uint8 color)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -397,31 +394,7 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
     QuadBitBoard pos = loadQuadBB(&positions[boardIndex]);
     GameState gs = states[boardIndex];
     CMove move = moves[index];
-#if HASH_IN_LEAF_KERNEL
-    Hash128 parentHash = hashes[boardIndex];
-    // Pre-move state for hash update
-    uint8 srcPiece = getPieceAt(&pos, move.getFrom());
-    uint8 capPiece = getPieceAt(&pos, move.getTo());
-    uint8 oldCastleRaw = gs.raw;
-    uint8 oldEP = gs.enPassent;
-#endif
     makeMove(&pos, &gs, move, color);
-#if HASH_IN_LEAF_KERNEL
-    Hash128 hash = updateHashAfterMove(parentHash, move, color,
-        srcPiece, capPiece, oldCastleRaw, gs.raw, oldEP, gs.enPassent);
-    // Probe TT for this position (remaining depth = bfsMinLevel - 1)
-    uint64 ttCount;
-    if (ttProbe(leafTT, hash, &ttCount))
-    {
-        if (perThreadCounts) perThreadCounts[index] = ttCount;
-        // Still need warp-reduce + atomicAdd for global counter
-        int tc = (int)ttCount;
-        warpReduce(tc);
-        if ((threadIdx.x & 0x1f) == 0)
-            atomicAdd(globalPerftCounter, (uint64)tc);
-        return;
-    }
-#endif
     // Generate all legal moves at level N-1 into local memory.
     // 218 moves covers the worst case
     CMove childMoves[218];
@@ -436,10 +409,6 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
         makeMove(&childPos, &childGs, childMoves[i], childColor);
         totalCount += countMoves(&childPos, &childGs, !childColor);
     }
-#if HASH_IN_LEAF_KERNEL
-    // Store result in TT
-    ttStore(leafTT, hash, (uint64)totalCount);
-#endif
     // Write per-thread count for upsweep
     if (perThreadCounts)
         perThreadCounts[index] = (uint64)totalCount;
@@ -794,29 +763,19 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
             return 0;
         }
     }
-    // Determine leaf TT (for fused kernel, remaining depth = bfsMinLevel - 1)
-    TTTable leafTT = {nullptr, 0};
-#if HASH_IN_LEAF_KERNEL
-    int leafRemDepth = bfsMinLevel - 1;
-    if (leafRemDepth >= 2 && leafRemDepth < MAX_TT_DEPTH)
-        leafTT = deviceTTs[leafRemDepth];
-#endif
     {
         int nBlocks = (currentCount - 1) / BLOCK_SIZE + 1;
         if (use2LevelLeaf)
         {
             fused_2level_leaf_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
-                                                               d_prevHashes,
                                                                d_indices, d_moves,
                                                                d_perftCounter,
                                                                d_leafCounts,
-                                                               leafTT,
                                                                currentCount, levelColor);
         }
         else
         {
             makeMove_and_perft_leaf_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
-                                                                      d_prevHashes,
                                                                       d_indices, d_moves,
                                                                       d_perftCounter,
                                                                       d_leafCounts,
