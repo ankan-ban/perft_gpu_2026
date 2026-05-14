@@ -42,24 +42,26 @@ The program prints cumulative perft results for depth 1 through the specified ma
 
 ## Performance
 
-### NVIDIA RTX 6000 Pro (Blackwell, 96GB VRAM, TCC mode)
+### NVIDIA RTX PRO 6000 (Blackwell, 96GB VRAM, TCC mode)
 
 Without transposition tables:
 
 | Position | Depth | Nodes | Time | Speed |
 |---|---|---|---|---|
-| Starting position | 9 | 2,439,530,234,167 | 2.05s | ~1,189 billion nps |
-| [Position 2](https://www.chessprogramming.org/Perft_Results#Position_2) (Kiwipete) | 7 | 374,190,009,323 | 0.19s | ~1,965 billion nps |
+| Starting position | 9 | 2,439,530,234,167 | 1.867s | ~1,306 billion nps |
+| [Position 2](https://www.chessprogramming.org/Perft_Results#Position_2) (Kiwipete) | 7 | 374,190,009,323 | 0.177s | ~2,110 billion nps |
 
-With transposition tables enabled, lossless host TTs, launch depth 8:
+With transposition tables enabled and lossless host TTs:
 
 | Position | Depth | Nodes | Time | Speed |
 |---|---|---|---|---|
-| Starting position | 9 | 2,439,530,234,167 | 0.29s | ~8,308 billion nps |
-| Starting position | 10 | 69,352,859,712,417 | 3.39s | ~20,428 billion nps |
-| Starting position | 11 | 2,097,651,003,696,806 | 41.15s | ~50,979 billion nps |
-| Starting position | 12 | 62,854,969,236,701,747 | 584.6s | ~107,516 billion nps |
-| Starting position | 13 | 1,981,066,775,000,396,239 | 9,126s | ~217,074 billion nps |
+| Starting position | 9 | 2,439,530,234,167 | 0.174s | ~14,001 billion nps |
+| Starting position | 10 | 69,352,859,712,417 | 2.041s | ~33,975 billion nps |
+| Starting position | 11 | 2,097,651,003,696,806 | 24.38s | ~86,046 billion nps |
+| Starting position | 12 | 62,854,969,236,701,747 | 374.1s | ~167,996 billion nps |
+| Starting position | 13 | 1,981,066,775,000,396,239 | 6,126.5s | ~323,359 billion nps |
+
+The other system data below was measured with a slightly older build, before some of the latest RTX PRO 6000 optimizations.
 
 ### NVIDIA RTX 4090
 

@@ -102,14 +102,12 @@ public:
         m_Move = ((flags & 0xF) << 12) | ((to & 0x3F) << 6) | (from & 0x3F);
     }
 
-    CUDA_CALLABLE_MEMBER CMove()
-    {
-        m_Move = 0;
-    }
+    CMove() = default;
 
     CUDA_CALLABLE_MEMBER unsigned int getTo()    const {return (m_Move >> 6)  & 0x3F;}
     CUDA_CALLABLE_MEMBER unsigned int getFrom()  const {return (m_Move)       & 0x3F;}
     CUDA_CALLABLE_MEMBER unsigned int getFlags() const {return (m_Move >> 12) & 0x0F;}
+    CUDA_CALLABLE_MEMBER uint16 raw() const { return m_Move; }
 
 protected:
 

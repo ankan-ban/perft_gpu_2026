@@ -44,6 +44,7 @@ __device__ __forceinline__ void makeMove(QuadBitBoard *pos, GameState *gs, CMove
         MoveGeneratorBitboard::makeMove<WHITE>(pos, gs, move);
     }
 }
+
 __host__ __device__ __forceinline__ uint32 countMoves(QuadBitBoard *pos, GameState *gs, uint8 color)
 {
     if (color == BLACK)
@@ -58,10 +59,15 @@ __host__ __device__ __forceinline__ uint32 countMoves(QuadBitBoard *pos, GameSta
 // fast reduction for the warp
 __device__ __forceinline__ void warpReduce(int &x)
 {
+#if __CUDA_ARCH__ >= 800
+    x = __reduce_add_sync(0xFFFFFFFF, x);
+#else
     #pragma unroll
     for(int mask = 16; mask > 0 ; mask >>= 1)
         x += __shfl_xor_sync(0xFFFFFFFF, x, mask);
+#endif
 }
+
 // -------------------------------------------------------------------------
 // Merge-path interval expand kernels
 // -------------------------------------------------------------------------
@@ -191,8 +197,7 @@ struct GpuBumpAllocator
 // GPU kernels for the host-driven BFS perft
 // -------------------------------------------------------------------------
 // Kernel: make move on parent board, produce child board, count child moves.
-// When useTT=true: also compute hash, probe device TT, write hash/ttHitCounts.
-// Templated so the false instantiation has zero hash/TT overhead (no extra registers).
+// When useTT=true, also compute hash, probe device TT, and write hash/TT-hit counts.
 template <bool useTT>
 #if LIMIT_REGISTER_USE == 1
 __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
@@ -208,7 +213,6 @@ __global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, Game
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
     int nMoves = 0;
-    uint64 ttHit = 0;
     if (index < nThreads)
     {
         int parentIndex = indices[index];
@@ -216,24 +220,17 @@ __global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, Game
         GameState gs = parentStates[parentIndex];
         CMove move = moves[index];
 
-        Hash128 hash = {};
-        uint8 srcPiece = 0, capPiece = 0, oldCastleRaw = 0, oldEP = 0;
-        if (useTT)
+        if constexpr (useTT)
         {
-            hash = parentHashes[parentIndex];
-            srcPiece = getPieceAt(&pos, move.getFrom());
-            capPiece = getPieceAt(&pos, move.getTo());
-            oldCastleRaw = gs.raw;
-            oldEP = gs.enPassent;
-        }
-
-        makeMove(&pos, &gs, move, color);
-
-        if (useTT)
-        {
+            Hash128 hash = parentHashes[parentIndex];
+            uint8 srcPiece = getPieceAt(&pos, move.getFrom());
+            uint8 capPiece = getPieceAt(&pos, move.getTo());
+            uint8 oldCastleRaw = gs.raw;
+            uint8 oldEP = gs.enPassent;
+            makeMove(&pos, &gs, move, color);
             hash = updateHashAfterMove(hash, move, color,
                 srcPiece, capPiece, oldCastleRaw, gs.raw, oldEP, gs.enPassent);
-            // Probe device TT
+            uint64 ttHit = 0;
             uint64 ttCount;
             if (ttProbe(deviceTT, hash, &ttCount))
             {
@@ -249,6 +246,7 @@ __global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, Game
         }
         else
         {
+            makeMove(&pos, &gs, move, color);
             nMoves = countMoves(&pos, &gs, !color);
         }
 
@@ -262,7 +260,7 @@ __global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, Game
 // Without this, each thread writes 2-byte CMoves to scattered global addresses
 // (6.25% sector utilization, 85% wasted traffic). With staging, the CTA
 // cooperatively copies the compacted move buffer to global memory at 100% utilization.
-#define SMEM_MOVES_CAPACITY (BLOCK_SIZE * 64)
+#define SMEM_MOVES_CAPACITY (BLOCK_SIZE * 32)
 __global__ void generate_moves_kernel(QuadBitBoard *positions, GameState *states,
                                        CMove *generatedMovesBase, int *inclPrefixSums, int nThreads, uint8 color)
 {
@@ -312,10 +310,12 @@ __global__ void generate_moves_kernel(QuadBitBoard *positions, GameState *states
     }
 }
 // Kernel: leaf level - make move and count, add to global perft counter
+template <bool useTT>
 #if LIMIT_REGISTER_USE == 1
 __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 #endif
 __global__ void makeMove_and_perft_leaf_kernel(QuadBitBoard *positions, GameState *states,
+                                                Hash128 *hashes,
                                                 int *indices, CMove *moves,
                                                 uint64 *globalPerftCounter,
                                                 uint64 *perThreadCounts,
@@ -332,8 +332,14 @@ __global__ void makeMove_and_perft_leaf_kernel(QuadBitBoard *positions, GameStat
     // count moves at this position
     int nMoves = countMoves(&pos, &gs, !color);
     // Write per-thread count for upsweep
-    if (perThreadCounts)
-        perThreadCounts[index] = (uint64)nMoves;
+    if constexpr (useTT)
+    {
+        if (perThreadCounts)
+        {
+            perThreadCounts[index] = (uint64)nMoves;
+            return;
+        }
+    }
     // warp-wide reduction before atomic add
     warpReduce(nMoves);
     int laneId = threadIdx.x & 0x1f;
@@ -372,6 +378,23 @@ __global__ void perft_2level_from_board_kernel(QuadBitBoard *boards, GameState *
         atomicAdd(globalPerftCounter, (uint64)totalCount);
     }
 }
+
+template<uint8 childColor>
+__device__ __forceinline__ int fusedCountChildren(QuadBitBoard pos, GameState gs)
+{
+    CMove childMoves[FUSED_CHILD_MOVES_CAP];
+    int nChildMoves = MoveGeneratorBitboard::generateMoves<childColor>(&pos, &gs, childMoves);
+    int totalCount = 0;
+    for (int i = 0; i < nChildMoves; i++)
+    {
+        QuadBitBoard childPos = pos;
+        GameState childGs = gs;
+        MoveGeneratorBitboard::makeMove<childColor>(&childPos, &childGs, childMoves[i]);
+        totalCount += MoveGeneratorBitboard::countMoves<!childColor>(&childPos, &childGs);
+    }
+    return totalCount;
+}
+
 // -------------------------------------------------------------------------
 // Fused 2-level leaf kernel: replaces the last BFS level + leaf kernel.
 // Each thread makes a move to get a child position, generates all legal
@@ -379,11 +402,14 @@ __global__ void perft_2level_from_board_kernel(QuadBitBoard *boards, GameState *
 // Saves massive memory (no need for the huge move/index arrays of the last
 // BFS level) and improves cache locality (siblings processed together).
 // -------------------------------------------------------------------------
+template <bool useTT>
 __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *states,
+                                          Hash128 *hashes,
                                           int *indices, CMove *moves,
                                           uint64 *globalPerftCounter,
                                           uint64 *perThreadCounts,
+                                          TTTable leafTT,
                                           int nThreads, uint8 color)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -394,24 +420,56 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
     QuadBitBoard pos = loadQuadBB(&positions[boardIndex]);
     GameState gs = states[boardIndex];
     CMove move = moves[index];
-    makeMove(&pos, &gs, move, color);
-    // Generate all legal moves at level N-1 into local memory.
-    // 218 moves covers the worst case
-    CMove childMoves[218];
-    uint8 childColor = !color;  // after makeMove, chance is flipped
-    int nChildMoves = generateMoves(&pos, &gs, childColor, childMoves);
-    // For each child move: make it and count grandchildren
+
     int totalCount = 0;
-    for (int i = 0; i < nChildMoves; i++)
+    if constexpr (useTT && HASH_IN_LEAF_KERNEL)
     {
-        QuadBitBoard childPos = pos;
-        GameState childGs = gs;
-        makeMove(&childPos, &childGs, childMoves[i], childColor);
-        totalCount += countMoves(&childPos, &childGs, !childColor);
+        Hash128 hash = hashes[boardIndex];
+        uint8 srcPiece = getPieceAt(&pos, move.getFrom());
+        uint8 capPiece = getPieceAt(&pos, move.getTo());
+        uint8 oldCastleRaw = gs.raw;
+        uint8 oldEP = gs.enPassent;
+        makeMove(&pos, &gs, move, color);
+        hash = updateHashAfterMove(hash, move, color,
+            srcPiece, capPiece, oldCastleRaw, gs.raw, oldEP, gs.enPassent);
+        uint64 ttCount;
+        if (ttProbe(leafTT, hash, &ttCount))
+        {
+            if (perThreadCounts)
+            {
+                perThreadCounts[index] = ttCount;
+                return;
+            }
+            int tc = (int)ttCount;
+            warpReduce(tc);
+            if ((threadIdx.x & 0x1f) == 0)
+                atomicAdd(globalPerftCounter, (uint64)tc);
+            return;
+        }
+
+        uint8 childColor = !color;  // after makeMove, chance is flipped
+        totalCount = (childColor == BLACK) ? fusedCountChildren<BLACK>(pos, gs) :
+                                             fusedCountChildren<WHITE>(pos, gs);
+        ttStore(leafTT, hash, (uint64)totalCount);
     }
+    else
+    {
+        makeMove(&pos, &gs, move, color);
+        uint8 childColor = !color;  // after makeMove, chance is flipped
+        totalCount = (childColor == BLACK) ? fusedCountChildren<BLACK>(pos, gs) :
+                                             fusedCountChildren<WHITE>(pos, gs);
+    }
+
     // Write per-thread count for upsweep
-    if (perThreadCounts)
-        perThreadCounts[index] = (uint64)totalCount;
+    if constexpr (useTT)
+    {
+        if (perThreadCounts)
+        {
+            perThreadCounts[index] = (uint64)totalCount;
+            return;
+        }
+    }
+
     // Warp-wide reduction before atomic add
     warpReduce(totalCount);
     int laneId = threadIdx.x & 0x1f;
@@ -420,6 +478,7 @@ __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *sta
         atomicAdd(globalPerftCounter, (uint64)totalCount);
     }
 }
+
 // -------------------------------------------------------------------------
 // Upsweep kernels: propagate per-position counts back through BFS levels
 // -------------------------------------------------------------------------
@@ -575,10 +634,10 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
     GameState *d_rootState = alloc.alloc<GameState>(1);
     cudaMemcpy(d_rootPos, pos, sizeof(QuadBitBoard), cudaMemcpyHostToDevice);
     cudaMemcpy(d_rootState, gs, sizeof(GameState), cudaMemcpyHostToDevice);
-    // Copy root hash to GPU (only needed for TT — hash flow through BFS levels)
     Hash128 *d_rootHash = nullptr;
     if (g_useTT)
     {
+        // Copy root hash to GPU
         Hash128 rootHash = computeHash(pos, gs, rootColor);
         d_rootHash = alloc.alloc<Hash128>(1);
         cudaMemcpy(d_rootHash, &rootHash, sizeof(Hash128), cudaMemcpyHostToDevice);
@@ -603,7 +662,7 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
     int currentCount = rootMoveCount;
     // Use fused 2-level leaf for depth >= 4: saves memory and improves locality.
     // The 2-level leaf handles the last 2 levels, so BFS stops one level earlier.
-    bool use2LevelLeaf = (depth >= 4);
+    bool use2LevelLeaf = (USE_FUSED_2LEVEL_LEAF && depth >= 4);
     int bfsMinLevel = use2LevelLeaf ? 3 : 2;
     // Track color through BFS levels: root positions have rootColor,
     // first makeMove uses rootColor, producing positions with !rootColor, etc.
@@ -621,43 +680,47 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
     for (int level = depth - 1; level >= bfsMinLevel; level--)
     {
         int remainingDepth = level;
-        // Allocate boards, states, move counts; hashes + TT hit counts only when TT enabled
+        // Allocate boards, states, hashes, move counts, TT hit counts
         QuadBitBoard *d_curBoards = alloc.alloc<QuadBitBoard>(currentCount);
         GameState *d_curStates = alloc.alloc<GameState>(currentCount);
-        Hash128 *d_curHashes = g_useTT ? alloc.alloc<Hash128>(currentCount) : nullptr;
+        Hash128 *d_curHashes = nullptr;
+        if (g_useTT)
+            d_curHashes = alloc.alloc<Hash128>(currentCount);
         int *d_moveCounts = alloc.alloc<int>(currentCount);
-        uint64 *d_ttHitCounts = g_useTT ? alloc.alloc<uint64>(currentCount) : nullptr;
-        if (!d_curBoards || !d_curStates || !d_moveCounts
-            || (g_useTT && (!d_curHashes || !d_ttHitCounts)))
+        uint64 *d_ttHitCounts = nullptr;
+        if (g_useTT)
+            d_ttHitCounts = alloc.alloc<uint64>(currentCount);
+        if (!d_curBoards || !d_curStates || !d_moveCounts ||
+            (g_useTT && (!d_curHashes || !d_ttHitCounts)))
         {
             cudaDeviceSynchronize();
             g_lastBfsOom = true;
             g_lastBfsPeakMemory = alloc.peakOffset;
             return 0;
         }
-        // Step 1: make moves, count child moves; with TT: compute hashes, probe TT
+        // Step 1: make moves, compute hashes, count child moves, probe TT
         int nBlocks = (currentCount - 1) / BLOCK_SIZE + 1;
         TTTable curTT = {nullptr, 0};
         if (g_useTT && remainingDepth >= 3 && remainingDepth < MAX_TT_DEPTH)
             curTT = deviceTTs[remainingDepth];
         if (g_useTT)
             makemove_and_count_moves_kernel<true><<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
-                                                                   d_prevHashes,
-                                                                   d_indices, d_moves,
-                                                                   d_curBoards, d_curStates,
-                                                                   d_curHashes,
-                                                                   d_moveCounts, d_ttHitCounts,
-                                                                   curTT,
-                                                                   currentCount, levelColor);
+                                                                           d_prevHashes,
+                                                                           d_indices, d_moves,
+                                                                           d_curBoards, d_curStates,
+                                                                           d_curHashes,
+                                                                           d_moveCounts, d_ttHitCounts,
+                                                                           curTT,
+                                                                           currentCount, levelColor);
         else
             makemove_and_count_moves_kernel<false><<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
-                                                                   nullptr,
-                                                                   d_indices, d_moves,
-                                                                   d_curBoards, d_curStates,
-                                                                   nullptr,
-                                                                   d_moveCounts, nullptr,
-                                                                   curTT,
-                                                                   currentCount, levelColor);
+                                                                            nullptr,
+                                                                            d_indices, d_moves,
+                                                                            d_curBoards, d_curStates,
+                                                                            nullptr,
+                                                                            d_moveCounts, nullptr,
+                                                                            curTT,
+                                                                            currentCount, levelColor);
 
         // BFS-level dedup: detect identical positions and skip expanding duplicates
         int *d_redirects = nullptr;
@@ -685,14 +748,18 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
                 d_redirects = nullptr;  // OOM, skip dedup
             }
         }
+
         // Save state for upsweep (before d_indices gets overwritten)
-        levelSaves[numLevels].indicesToParent = d_indices;
-        levelSaves[numLevels].hashes = d_curHashes;
-        levelSaves[numLevels].ttHitCounts = d_ttHitCounts;
-        levelSaves[numLevels].redirects = d_redirects;
-        levelSaves[numLevels].count = currentCount;
-        levelSaves[numLevels].remainingDepth = remainingDepth;
-        numLevels++;
+        if (g_useTT)
+        {
+            levelSaves[numLevels].indicesToParent = d_indices;
+            levelSaves[numLevels].hashes = d_curHashes;
+            levelSaves[numLevels].ttHitCounts = d_ttHitCounts;
+            levelSaves[numLevels].redirects = d_redirects;
+            levelSaves[numLevels].count = currentCount;
+            levelSaves[numLevels].remainingDepth = remainingDepth;
+            numLevels++;
+        }
         // After makeMove, positions are now at the flipped color
         levelColor = !levelColor;
         // Step 2: in-place inclusive prefix sum
@@ -752,7 +819,7 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
 #endif
     // Final level: leaf kernel
     uint64 *d_leafCounts = nullptr;
-    if (g_useTT)
+    if (g_useTT && numLevels > 0)
     {
         d_leafCounts = alloc.alloc<uint64>(currentCount);
         if (!d_leafCounts && currentCount > 0)
@@ -763,32 +830,60 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
             return 0;
         }
     }
+    // Determine leaf TT (for fused kernel, remaining depth = bfsMinLevel - 1)
+    TTTable leafTT = {nullptr, 0};
+    if (g_useTT && HASH_IN_LEAF_KERNEL)
+    {
+        int leafRemDepth = bfsMinLevel - 1;
+        if (leafRemDepth >= 2 && leafRemDepth < MAX_TT_DEPTH)
+            leafTT = deviceTTs[leafRemDepth];
+    }
     {
         int nBlocks = (currentCount - 1) / BLOCK_SIZE + 1;
         if (use2LevelLeaf)
         {
-            fused_2level_leaf_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
-                                                               d_indices, d_moves,
-                                                               d_perftCounter,
-                                                               d_leafCounts,
-                                                               currentCount, levelColor);
+            if (g_useTT)
+                fused_2level_leaf_kernel<true><<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                                         d_prevHashes,
+                                                                         d_indices, d_moves,
+                                                                         d_perftCounter,
+                                                                         d_leafCounts,
+                                                                         leafTT,
+                                                                         currentCount, levelColor);
+            else
+                fused_2level_leaf_kernel<false><<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                                          nullptr,
+                                                                          d_indices, d_moves,
+                                                                          d_perftCounter,
+                                                                          nullptr,
+                                                                          leafTT,
+                                                                          currentCount, levelColor);
         }
         else
         {
-            makeMove_and_perft_leaf_kernel<<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
-                                                                      d_indices, d_moves,
-                                                                      d_perftCounter,
-                                                                      d_leafCounts,
-                                                                      currentCount, levelColor);
+            if (g_useTT)
+                makeMove_and_perft_leaf_kernel<true><<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                                               d_prevHashes,
+                                                                               d_indices, d_moves,
+                                                                               d_perftCounter,
+                                                                               d_leafCounts,
+                                                                               currentCount, levelColor);
+            else
+                makeMove_and_perft_leaf_kernel<false><<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                                                nullptr,
+                                                                                d_indices, d_moves,
+                                                                                d_perftCounter,
+                                                                                nullptr,
+                                                                                currentCount, levelColor);
         }
         cudaDeviceSynchronize();
     }
     uint64 result = 0;
+    // Upsweep: propagate per-position counts back through BFS levels and store in TT.
+    // The upsweep result is the authoritative total (includes TT hit counts from
+    // intermediate levels that the leaf kernel's global atomic counter misses).
     if (g_useTT && numLevels > 0 && d_leafCounts)
     {
-        // Upsweep: propagate per-position counts back through BFS levels and store in TT.
-        // The upsweep result is the authoritative total (includes TT hit counts from
-        // intermediate levels that the leaf kernel's global atomic counter misses).
         uint64 *currentChildCounts = d_leafCounts;
         int currentChildCount = currentCount;
         int *currentChildIndices = d_indices;  // leaf indices

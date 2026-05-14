@@ -4,6 +4,9 @@
 #include <math.h>
 #include <chrono>
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <unistd.h>
@@ -65,7 +68,8 @@ void initGPU(int gpu)
     cudaMemGetInfo(&free, &total);
     printf("\ngpu: %d, memory total: %llu, free: %llu\n", gpu, (unsigned long long)total, (unsigned long long)free);
 
-    // BFS buffer: with TT, use min(16GB, 33% of device mem); without TT, min(16GB, 95%)
+    // Keep TT mode from consuming all VRAM with the BFS arena; no-TT keeps the
+    // full tuned arena size used by the Kiwipete benchmark.
     uint64 target = g_useTT ? (uint64)(total * 33 / 100) : (uint64)(total * 95 / 100);
     uint64 cap = PREALLOCATED_MEMORY_SIZE;
     g_preAllocatedMemorySize = (target < cap) ? target : cap;
@@ -98,20 +102,37 @@ static uint64 floorPow2(uint64 n)
     return (n + 1) >> 1;
 }
 
+static uint64 getSystemMemoryBytes()
+{
+#ifdef _WIN32
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status))
+        return (uint64)status.ullTotalPhys;
+    return 0;
+#else
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long pageSize = sysconf(_SC_PAGE_SIZE);
+    if (pages <= 0 || pageSize <= 0)
+        return 0;
+    return (uint64)pages * (uint64)pageSize;
+#endif
+}
+
 // Overridable TT budgets (set from CLI before calling initTT)
 int g_deviceTTBudgetMB = DEVICE_TT_BUDGET_MB;
 int g_hostTTBudgetMB = HOST_TT_BUDGET_MB;
 
 void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFactor)
 {
-    if (!g_useTT) return;
+    if (!g_useTT)
+        return;
 
     memset(deviceTTs, 0, sizeof(deviceTTs));
     memset(hostLosslessTTs, 0, sizeof(hostLosslessTTs));
 
-    // Device TTs: depths 3 through maxLaunchDepth-1 (GPU BFS levels)
-    // Allocate for the widest possible LD range to support dynamic LD increase.
-    // Depth 2 is unused: bfsMinLevel=3 means no BFS level probes TT[2].
+    // Device TTs: depth 2 is reserved for the fused leaf when enabled; depths
+    // 3 through maxLaunchDepth-1 are used by GPU BFS levels.
     int numDeviceTTs = 0;
     for (int d = 3; d < maxLaunchDepth && d < MAX_TT_DEPTH; d++)
         numDeviceTTs++;
@@ -125,44 +146,58 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFa
         }
         else
         {
-            // Auto-size: use 95% of free VRAM (after BFS buffer) for device TTs
+            // Auto-size: use most of the free VRAM left after the BFS buffer.
+            // Perft 10 benefits from larger device TTs, and misses are exact.
             size_t freeMem = 0, totalMem = 0;
             cudaMemGetInfo(&freeMem, &totalMem);
-            budgetBytes = (uint64)(freeMem * 95 / 100);
-            printf("Auto device TT budget: %llu MB (95%% of %llu MB free)\n",
+            budgetBytes = (uint64)(freeMem * 99 / 100);
+            printf("Auto device TT budget: %llu MB (99%% of %llu MB free)\n",
                    (unsigned long long)(budgetBytes / (1024*1024)),
                    (unsigned long long)(freeMem / (1024*1024)));
         }
 
-        // Pick two power-of-2 entry counts: smallPow2 fits all TTs evenly,
-        // largePow2 = 2x for upgrading shallow levels with leftover budget.
-        uint64 perTableBytes = budgetBytes / numDeviceTTs;
-        uint64 smallPow2 = floorPow2(perTableBytes / sizeof(TTEntry));
-        if (smallPow2 < 1024) smallPow2 = 1024;
-        uint64 largePow2 = smallPow2 * 2;
+        // Optional depth-2 TT for the fused 2-level leaf. Reserve it before
+        // weighting the deeper BFS TTs so the final split is explicit and
+        // power-of-two rounding preserves the important depth 3..7 tables.
+#if HASH_IN_LEAF_KERNEL
+        const uint64 leafEntries = 2048ull * 1024 * 1024;
+        const uint64 leafBytes = leafEntries * sizeof(TTEntry);
+        if (budgetBytes > leafBytes)
+        {
+            cudaError_t err = cudaMalloc(&deviceTTs[2].entries, leafBytes);
+            if (err == cudaSuccess)
+            {
+                cudaMemset(deviceTTs[2].entries, 0, leafBytes);
+                deviceTTs[2].mask = leafEntries - 1;
+                budgetBytes -= leafBytes;
+                printf("Device TT[2]: %lluM entries (%llu MB)\n",
+                       (unsigned long long)(leafEntries / (1024*1024)),
+                       (unsigned long long)(leafBytes / (1024*1024)));
+            }
+            else
+            {
+                printf("Warning: failed to allocate device TT[2] (%llu MB): %s\n",
+                       (unsigned long long)(leafBytes / (1024*1024)),
+                       cudaGetErrorString(err));
+            }
+        }
+#endif
 
-        // Determine which depths get the larger allocation.
-        // Start with all at smallPow2, then upgrade from depth 3 upward.
-        uint64 baseTotal = (uint64)numDeviceTTs * smallPow2 * sizeof(TTEntry);
-        uint64 remaining = (baseTotal <= budgetBytes) ? budgetBytes - baseTotal : 0;
-        uint64 upgradeBytes = (largePow2 - smallPow2) * sizeof(TTEntry);
-
-        uint64 entryCount[MAX_TT_DEPTH];
-        memset(entryCount, 0, sizeof(entryCount));
-        for (int d = 3; d < maxLaunchDepth && d < MAX_TT_DEPTH; d++)
-            entryCount[d] = smallPow2;
-
-        // Upgrade shallow depths first (d=3, 4, 5, ...) while budget allows
+        double weights[MAX_TT_DEPTH];
+        memset(weights, 0, sizeof(weights));
+        double totalWeight = 0.0;
+        int lastDeviceDepth = maxLaunchDepth - 1;
         for (int d = 3; d < maxLaunchDepth && d < MAX_TT_DEPTH; d++)
         {
-            if (remaining < upgradeBytes) break;
-            entryCount[d] = largePow2;
-            remaining -= upgradeBytes;
+            weights[d] = (d == lastDeviceDepth && numDeviceTTs > 1) ? 0.5 : 1.0;
+            totalWeight += weights[d];
         }
 
         for (int d = 3; d < maxLaunchDepth && d < MAX_TT_DEPTH; d++)
         {
-            uint64 entries = entryCount[d];
+            uint64 depthBytes = (uint64)((long double)budgetBytes * weights[d] / totalWeight);
+            uint64 entries = floorPow2(depthBytes / sizeof(TTEntry));
+            if (entries < 1024) entries = 1024;
 
             cudaError_t err = cudaMalloc(&deviceTTs[d].entries, entries * sizeof(TTEntry));
             if (err != cudaSuccess)
@@ -191,29 +226,21 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFa
 
     if (numHostTTs > 0)
     {
-        // Auto-detect: 90% of total system RAM
-        if (g_hostTTBudgetMB <= 0)
+        uint64 budgetBytes;
+        if (g_hostTTBudgetMB > 0)
         {
-            uint64 totalRAM = 0;
-#ifdef _WIN32
-            MEMORYSTATUSEX memInfo;
-            memInfo.dwLength = sizeof(memInfo);
-            if (GlobalMemoryStatusEx(&memInfo))
-                totalRAM = memInfo.ullTotalPhys;
-#else
-            long pages = sysconf(_SC_PHYS_PAGES);
-            long pageSize = sysconf(_SC_PAGE_SIZE);
-            if (pages > 0 && pageSize > 0)
-                totalRAM = (uint64)pages * (uint64)pageSize;
-#endif
-            if (totalRAM > 0)
-                g_hostTTBudgetMB = (int)((totalRAM * 9 / 10) / (1024 * 1024));
-            else
-                g_hostTTBudgetMB = 65536;  // fallback
-            printf("Host TT budget: auto %d MB (90%% of %llu MB system RAM)\n",
-                   g_hostTTBudgetMB, (unsigned long long)(totalRAM / (1024 * 1024)));
+            budgetBytes = (uint64)g_hostTTBudgetMB * 1024 * 1024;
         }
-        uint64 budgetBytes = (uint64)g_hostTTBudgetMB * 1024 * 1024;
+        else
+        {
+            uint64 totalHostBytes = getSystemMemoryBytes();
+            if (totalHostBytes == 0)
+                totalHostBytes = 64ull * 1024 * 1024 * 1024;
+            budgetBytes = totalHostBytes * 90 / 100;
+            printf("Host TT budget: auto %llu MB (90%% of %llu MB system RAM)\n",
+                   (unsigned long long)(budgetBytes / (1024*1024)),
+                   (unsigned long long)(totalHostBytes / (1024*1024)));
+        }
 
         // Compute proportional weights
         double weights[MAX_TT_DEPTH];
@@ -319,10 +346,11 @@ void printTTStats()
     }
     if (g_iterPeakBfsMemory > 0)
     {
+        uint64 arenaBytes = g_preAllocatedMemorySize ? g_preAllocatedMemorySize : PREALLOCATED_MEMORY_SIZE;
         printf("  Peak BFS memory: %llu MB / %llu MB (%.1f%%)\n",
                (unsigned long long)(g_iterPeakBfsMemory / (1024*1024)),
-               (unsigned long long)(g_preAllocatedMemorySize / (1024*1024)),
-               100.0 * g_iterPeakBfsMemory / g_preAllocatedMemorySize);
+               (unsigned long long)(arenaBytes / (1024*1024)),
+               100.0 * g_iterPeakBfsMemory / arenaBytes);
     }
     // Detailed call diagnostics (only for iterations with significant GPU calls)
     if (g_gpuCallCount > 10)
@@ -405,6 +433,9 @@ void printTTStats()
 
 void clearDeviceTTs()
 {
+    if (!g_useTT)
+        return;
+
     for (int d = 0; d < MAX_TT_DEPTH; d++)
     {
         if (deviceTTs[d].entries)
@@ -414,6 +445,9 @@ void clearDeviceTTs()
 
 void freeTT()
 {
+    if (!g_useTT)
+        return;
+
     for (int d = 0; d < MAX_TT_DEPTH; d++)
     {
         if (deviceTTs[d].entries)
@@ -449,7 +483,8 @@ uint32 estimateLaunchDepth(QuadBitBoard *pos, GameState *gs, uint8 rootColor, fl
     // With the fused 2-level leaf kernel, the last BFS level's huge move/index
     // arrays are eliminated. This effectively multiplies the memory budget by
     // the branching factor, allowing a higher launch depth (fewer CPU calls).
-    float memLimit = (float)g_preAllocatedMemorySize / 2.0f * branchingFactor;
+    uint64 arenaBytes = g_preAllocatedMemorySize ? g_preAllocatedMemorySize : PREALLOCATED_MEMORY_SIZE;
+    float memLimit = (float)arenaBytes / 2.0f * branchingFactor;
 
     // estimated depth is log of memLimit in base 'branchingFactor'
     uint32 depth = (uint32)(log(memLimit) / log(branchingFactor));
@@ -463,11 +498,11 @@ static int g_effectiveLD = 0;
 int getEffectiveLD() { return g_effectiveLD; }
 void setEffectiveLD(int ld) { g_effectiveLD = ld; }
 
-// Serial CPU recursion at top levels, launching GPU BFS at launchDepth
-// Returns uint128 to handle overflow at deep perft (15+) where summing
-// many uint64 GPU results exceeds 64-bit range.
+// Serial CPU recursion at top levels, launching GPU BFS at launchDepth.
+// Returns uint128 so summing many uint64 GPU results cannot overflow.
 static uint128 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, int depth, int launchDepth, Hash128 hash, void *gpuBuffer, size_t bufferSize)
 {
+    // Probe host TT (all depths use lossless tables)
     if (g_useTT && depth >= 2)
     {
         uint64 ttCount;
@@ -476,7 +511,7 @@ static uint128 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, 
 #if VERBOSE_LOGGING
             g_hostTTHits++;
 #endif
-            return uint128(ttCount);
+            return ttCount;
         }
 #if VERBOSE_LOGGING
         g_hostTTMisses++;
@@ -580,24 +615,28 @@ static uint128 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, 
             childPos = *pos;
             childGs = *gs;
 
-            // Pre-move state for hash update
-            uint8 srcPiece = getPieceAt(pos, moves[i].getFrom());
-            uint8 capPiece = getPieceAt(pos, moves[i].getTo());
-            uint8 oldCastleRaw = gs->raw;
-            uint8 oldEP = gs->enPassent;
+            uint8 srcPiece = 0, capPiece = 0, oldCastleRaw = 0, oldEP = 0;
+            if (g_useTT)
+            {
+                srcPiece = getPieceAt(pos, moves[i].getFrom());
+                capPiece = getPieceAt(pos, moves[i].getTo());
+                oldCastleRaw = gs->raw;
+                oldEP = gs->enPassent;
+            }
 
             if (color == WHITE)
                 MoveGeneratorBitboard::makeMove<WHITE>(&childPos, &childGs, moves[i]);
             else
                 MoveGeneratorBitboard::makeMove<BLACK>(&childPos, &childGs, moves[i]);
 
-            Hash128 childHash = updateHashAfterMove(hash, moves[i], color,
-                srcPiece, capPiece, oldCastleRaw, childGs.raw, oldEP, childGs.enPassent);
+            Hash128 childHash = g_useTT ? updateHashAfterMove(hash, moves[i], color,
+                srcPiece, capPiece, oldCastleRaw, childGs.raw, oldEP, childGs.enPassent) : Hash128{0, 0};
 
             count += perft_cpu_recurse(&childPos, &childGs, !color, depth - 1, launchDepth, childHash, gpuBuffer, bufferSize);
         }
     }
 
+    // Store in host TT (all depths use lossless tables)
     if (g_useTT && depth >= 2 && count.hi == 0)
     {
         losslessStore(hostLosslessTTs[depth], hash, count.lo);
@@ -609,7 +648,7 @@ static uint128 perft_cpu_recurse(QuadBitBoard *pos, GameState *gs, uint8 color, 
 
 void perftLauncher(QuadBitBoard *pos, GameState *gs, uint8 rootColor, uint32 depth, int launchDepth)
 {
-    Hash128 rootHash = computeHash(pos, gs, rootColor);
+    Hash128 rootHash = g_useTT ? computeHash(pos, gs, rootColor) : Hash128{0, 0};
 
     Timer timer;
     timer.start();
@@ -673,15 +712,19 @@ static uint64 perft_cpu(QuadBitBoard *pos, GameState *gs, uint32 depth, Hash128 
         QuadBitBoard childPos = *pos;
         GameState childGs = *gs;
 
-        uint8 srcPiece = getPieceAt(pos, moves[i].getFrom());
-        uint8 capPiece = getPieceAt(pos, moves[i].getTo());
-        uint8 oldCastleRaw = gs->raw;
-        uint8 oldEP = gs->enPassent;
+        uint8 srcPiece = 0, capPiece = 0, oldCastleRaw = 0, oldEP = 0;
+        if (g_useTT)
+        {
+            srcPiece = getPieceAt(pos, moves[i].getFrom());
+            capPiece = getPieceAt(pos, moves[i].getTo());
+            oldCastleRaw = gs->raw;
+            oldEP = gs->enPassent;
+        }
 
         MoveGeneratorBitboard::makeMove<chance>(&childPos, &childGs, moves[i]);
 
-        Hash128 childHash = updateHashAfterMove(hash, moves[i], chance,
-            srcPiece, capPiece, oldCastleRaw, childGs.raw, oldEP, childGs.enPassent);
+        Hash128 childHash = g_useTT ? updateHashAfterMove(hash, moves[i], chance,
+            srcPiece, capPiece, oldCastleRaw, childGs.raw, oldEP, childGs.enPassent) : Hash128{0, 0};
 
         count += perft_cpu<!chance>(&childPos, &childGs, depth - 1, childHash);
     }
@@ -696,7 +739,7 @@ uint64 perft_cpu_dispatch(QuadBitBoard *pos, GameState *gs, uint8 color, uint32 
 {
     if (depth == 0)
         return 1;
-    Hash128 hash = computeHash(pos, gs, color);
+    Hash128 hash = g_useTT ? computeHash(pos, gs, color) : Hash128{0, 0};
     if (color == WHITE)
         return perft_cpu<WHITE>(pos, gs, depth, hash);
     else

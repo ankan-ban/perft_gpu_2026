@@ -84,7 +84,7 @@ int main(int argc, char *argv[])
     }
     else
     {
-        printf("\nUsage: perft_gpu <fen> <depth> [-nott] [-dtt <MB>] [-htt <MB>] [-ld <N>] [-cpu]\n");
+        printf("\nUsage: perft_gpu <fen> <depth> [<launchdepth>] [-nott] [-dtt <MB>] [-htt <MB>] [-ld <N>] [-cpu]\n");
         printf("\nAs no parameters were provided... running default test\n");
     }
 
@@ -124,9 +124,18 @@ int main(int argc, char *argv[])
         if (launchDepth < 6)
             launchDepth = 6;
 
+        // The fused leaf TT makes LD9 the best default for starting-position
+        // perft 10 on large-memory GPUs. Explicit CLI launch depth still wins.
+        if (maxDepth >= 10 && launchDepth < 9)
+            launchDepth = 9;
+
         if (g_launchDepthOverride > 0)
         {
             launchDepth = g_launchDepthOverride;
+        }
+        else if (argc >= 4)
+        {
+            launchDepth = atoi(argv[3]);
         }
 
         if ((uint32)maxDepth < launchDepth)

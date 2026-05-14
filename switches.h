@@ -5,7 +5,7 @@
 // can be tuned as per need
 // 256 works best for Maxwell
 // 384 best for newer chips!
-#define BLOCK_SIZE 384
+#define BLOCK_SIZE 416
 
 // limit max used registers to 64 for some kernels
 // improves occupancy and performance (but doesn't work with debug info or debug builds)
@@ -17,13 +17,20 @@
 // preallocated memory size (for holding the perft tree in GPU memory)
 #define PREALLOCATED_MEMORY_SIZE (16 * 1024 * 1024 * 1024ull)
 
+// use fused final two-ply leaf kernel instead of materializing the last move frontier
+#define USE_FUSED_2LEVEL_LEAF 1
+
+// generated child move buffer inside the fused final leaf
+#define FUSED_CHILD_MOVES_CAP 80
+
 // use combined magic entry struct on GPU (mask + magic in one 32-byte struct)
 // merges sqBishopAttacksMasked/sqRookAttacksMasked with FancyMagicEntry for
 // single cache-line access instead of two separate loads
 #define USE_COMBINED_MAGIC_GPU 1
 
-// transposition table settings (USE_TT is now a runtime flag: -nott to disable)
-#define DEVICE_TT_BUDGET_MB 0        // GPU memory budget for device TTs (MB). 0 = auto (50% of free VRAM)
+// transposition table settings (runtime flag: default on, disable with -nott)
+#define HASH_IN_LEAF_KERNEL 1        // TT probe/store in fused 2-level leaf kernel
+#define DEVICE_TT_BUDGET_MB 0        // GPU memory budget for device TTs (MB). 0 = auto (99% of free VRAM)
 #define HOST_TT_BUDGET_MB 0          // host memory budget for host TTs (MB). 0 = auto (90% of system RAM)
 
 // verbose diagnostics: call size/time histograms, per-BFS-level stats, progress reporting
