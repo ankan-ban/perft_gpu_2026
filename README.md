@@ -59,7 +59,7 @@ With transposition tables enabled and lossless host TTs:
 | Starting position | 10 | 69,352,859,712,417 | 2.041s | ~33,975 billion nps |
 | Starting position | 11 | 2,097,651,003,696,806 | 24.38s | ~86,046 billion nps |
 | Starting position | 12 | 62,854,969,236,701,747 | 374.1s | ~167,996 billion nps |
-| Starting position | 13 | 1,981,066,775,000,396,239 | 6,126.5s | ~323,359 billion nps |
+| Starting position | 13 | 1,981,066,775,000,396,239 | 5,664.9s | ~349,708 billion nps |
 
 The other system data below was measured with a slightly older build, before some of the latest RTX PRO 6000 optimizations.
 
