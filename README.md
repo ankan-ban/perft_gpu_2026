@@ -61,26 +61,26 @@ With transposition tables enabled and lossless host TTs:
 | Starting position | 12 | 62,854,969,236,701,747 | 374.1s | ~167,996 billion nps |
 | Starting position | 13 | 1,981,066,775,000,396,239 | 5,664.9s | ~349,708 billion nps |
 
-The other system data below was measured with a slightly older build, before some of the latest RTX PRO 6000 optimizations.
-
 ### NVIDIA RTX 4090
 
 Without transposition tables:
 
 | Position | Depth | Nodes | Time | Speed |
 |---|---|---|---|---|
-| Starting position | 9 | 2,439,530,234,167 | 3.25s | ~750 billion nps |
-| Starting position | 10 | 69,352,859,712,417 | 95.0s | ~730 billion nps |
-| [Position 2](https://www.chessprogramming.org/Perft_Results#Position_2) (Kiwipete) | 7 | 374,190,009,323 | 0.311s | ~1,204 billion nps |
-| [Position 3](https://www.chessprogramming.org/Perft_Results#Position_3) | 10 | 860,322,381,070 | 1.82s | ~474 billion nps |
+| Starting position | 9 | 2,439,530,234,167 | 2.90s | ~841 billion nps |
+| Starting position | 10 | 69,352,859,712,417 | 88.25s | ~786 billion nps |
+| [Position 2](https://www.chessprogramming.org/Perft_Results#Position_2) (Kiwipete) | 7 | 374,190,009,323 | 0.286s | ~1,308 billion nps |
+| [Position 3](https://www.chessprogramming.org/Perft_Results#Position_3) | 10 | 860,322,381,070 | 1.55s | ~555 billion nps |
 
 With transposition tables enabled, lossless host TTs, launch depth 8:
 
 | Position | Depth | Nodes | Time | Speed |
 |---|---|---|---|---|
-| Starting position | 9 | 2,439,530,234,167 | 0.47s | ~5,156 billion nps |
-| Starting position | 10 | 69,352,859,712,417 | 5.71s | ~12,149 billion nps |
-| Starting position | 11 | 2,097,651,003,696,806 | 78.95s | ~26,569 billion nps |
+| Starting position | 9 | 2,439,530,234,167 | 0.302s | ~8,066 billion nps |
+| Starting position | 10 | 69,352,859,712,417 | 3.91s | ~17,733 billion nps |
+| Starting position | 11 | 2,097,651,003,696,806 | 51.36s | ~40,840 billion nps |
+
+The DGX Spark data below was measured with a slightly older build, before some of the latest optimizations.
 
 ### NVIDIA DGX Spark (GB10 Grace Blackwell, 128GB unified LPDDR5x)
 
