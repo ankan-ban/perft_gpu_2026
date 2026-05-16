@@ -1879,7 +1879,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             uint8 knightIndex = bitScanOne(knight);
             uint64 knightMoves = sqKnightAttacks(knightIndex) & ~myPieces;
             nMoves += popCount(knightMoves);
-            myKnights ^= knight;
+            myKnights &= myKnights - 1;
         }
 
 
@@ -1896,7 +1896,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             bishopMoves &= sqsInLine(bishopIndex, kingIndex);
 
             nMoves += popCount(bishopMoves);
-            bishops ^= bishop;
+            bishops &= bishops - 1;
         }
 
         // remaining bishops/queens
@@ -1908,7 +1908,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             uint64 bishopMoves = bishopAttacksFromSquare(bishopIndex, emptySquares) & ~myPieces;
 
             nMoves += popCount(bishopMoves);
-            bishops ^= bishop;
+            bishops &= bishops - 1;
         }
 
         // rook/queen moves
@@ -1924,7 +1924,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             rookMoves &= sqsInLine(rookIndex, kingIndex);    // pined sliding pieces can move only along the line
 
             nMoves += popCount(rookMoves);
-            rooks ^= rook;
+            rooks &= rooks - 1;
         }
 
         // remaining rooks/queens
@@ -1936,7 +1936,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             uint64 rookMoves = rookAttacksFromSquare(rookIndex, emptySquares) & ~myPieces;
 
             nMoves += popCount(rookMoves);
-            rooks ^= rook;
+            rooks &= rooks - 1;
         }
 
         return nMoves;
