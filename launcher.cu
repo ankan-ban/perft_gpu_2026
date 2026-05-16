@@ -27,6 +27,7 @@ bool g_useTT = true;
 
 // Global TT arrays
 TTTable deviceTTs[MAX_TT_DEPTH];
+ShallowTTTable deviceShallowTT3 = {nullptr, 0};
 LosslessTT hostLosslessTTs[MAX_TT_DEPTH];
 
 static uint64 g_oomFallbackCount = 0;
@@ -129,6 +130,7 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFa
         return;
 
     memset(deviceTTs, 0, sizeof(deviceTTs));
+    deviceShallowTT3 = {nullptr, 0};
     memset(hostLosslessTTs, 0, sizeof(hostLosslessTTs));
 
     // Device TTs: depth 2 is reserved for the fused leaf when enabled; depths
@@ -196,6 +198,34 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFa
         for (int d = 3; d < maxLaunchDepth && d < MAX_TT_DEPTH; d++)
         {
             uint64 depthBytes = (uint64)((long double)budgetBytes * weights[d] / totalWeight);
+
+#if USE_SHALLOW_TT_DEPTH3
+            if (d == 3)
+            {
+                // Shallow TT for remaining depth 3 — 8B entries (2x density for same
+                // byte budget). 24-bit count fits depth-3 perft (max ~10.4M < 2^24).
+                uint64 entries = floorPow2(depthBytes / sizeof(uint64));
+                if (entries < (1ULL << 24)) entries = (1ULL << 24);  // need >= 2^24 for full hash.lo verification
+
+                cudaError_t err = cudaMalloc(&deviceShallowTT3.entries, entries * sizeof(uint64));
+                if (err != cudaSuccess)
+                {
+                    printf("Warning: failed to allocate device shallow TT[3] (%llu MB): %s\n",
+                           (unsigned long long)(entries * sizeof(uint64) / (1024*1024)),
+                           cudaGetErrorString(err));
+                    deviceShallowTT3.entries = nullptr;
+                    deviceShallowTT3.mask = 0;
+                    continue;
+                }
+                cudaMemset(deviceShallowTT3.entries, 0, entries * sizeof(uint64));
+                deviceShallowTT3.mask = entries - 1;
+                printf("Device TT[3] (shallow): %lluM entries (%llu MB)\n",
+                       (unsigned long long)(entries / (1024*1024)),
+                       (unsigned long long)(entries * sizeof(uint64) / (1024*1024)));
+                continue;
+            }
+#endif
+
             uint64 entries = floorPow2(depthBytes / sizeof(TTEntry));
             if (entries < 1024) entries = 1024;
 
@@ -441,6 +471,8 @@ void clearDeviceTTs()
         if (deviceTTs[d].entries)
             cudaMemset(deviceTTs[d].entries, 0, (deviceTTs[d].mask + 1) * sizeof(TTEntry));
     }
+    if (deviceShallowTT3.entries)
+        cudaMemset(deviceShallowTT3.entries, 0, (deviceShallowTT3.mask + 1) * sizeof(uint64));
 }
 
 void freeTT()
@@ -458,6 +490,11 @@ void freeTT()
         free(hostLosslessTTs[d].buckets);
         free(hostLosslessTTs[d].pool);
         memset(&hostLosslessTTs[d], 0, sizeof(LosslessTT));
+    }
+    if (deviceShallowTT3.entries)
+    {
+        cudaFree(deviceShallowTT3.entries);
+        deviceShallowTT3 = {nullptr, 0};
     }
 }
 

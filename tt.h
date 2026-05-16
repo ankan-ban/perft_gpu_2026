@@ -99,6 +99,63 @@ inline void ttStoreHost(const TTTable &tt, Hash128 hash, uint64 count)
 }
 
 // -------------------------------------------------------------------------
+// Shallow TT — 8-byte packed entry, used at remaining-depth 3 where the
+// perft count fits in 24 bits (218^3 ≈ 10.4M < 2^24).
+//
+// Entry layout: { hash.lo[63:24] as verification | count[23:0] }
+// Slot index = hash.lo & mask (mask = numEntries-1, numEntries ≥ 2^24)
+//   → the index implicitly carries low log2(numEntries) bits of hash.lo,
+//     and the stored high-40 bits complete 64-bit hash.lo verification.
+//
+// hash.hi is NOT verified (vs the 128-bit XOR scheme), so collision
+// resistance drops from 128-bit to 64-bit — still negligible false-match
+// rate at TT sizes ≤ 2^32 (idea borrowed from sister perft_cpu_2026).
+//
+// Aligned 8-byte loads/stores are atomic on Blackwell, so no torn-read
+// guard is needed. XOR locking is impossible without two fields, but the
+// stored count is hash-verifiable anyway.
+// -------------------------------------------------------------------------
+
+static const uint64 SHALLOW_PERFT_MASK = (1ULL << 24) - 1;   // bits [23:0]
+static const uint64 SHALLOW_VERIF_MASK = ~SHALLOW_PERFT_MASK; // bits [63:24]
+
+struct ShallowTTTable
+{
+    uint64 *entries;    // each = (hash.lo & VERIF_MASK) | (count & PERFT_MASK)
+    uint64 mask;        // numEntries - 1
+};
+
+#ifdef __CUDACC__
+
+__device__ __forceinline__ bool ttProbe(const ShallowTTTable &tt, Hash128 hash, uint64 *outCount)
+{
+    if (!tt.entries) return false;
+    uint64 idx = hash.lo & tt.mask;
+    uint64 entry;
+    asm volatile("ld.global.u64 %0, [%1];" : "=l"(entry) : "l"(&tt.entries[idx]));
+    if ((entry & SHALLOW_VERIF_MASK) == (hash.lo & SHALLOW_VERIF_MASK))
+    {
+        *outCount = entry & SHALLOW_PERFT_MASK;
+        return true;
+    }
+    return false;
+}
+
+__device__ __forceinline__ void ttStore(const ShallowTTTable &tt, Hash128 hash, uint64 count)
+{
+    if (!tt.entries) return;
+    // Safety: depth-3 perft values are bounded by ~218^3 = 10.4M, well under
+    // 2^24 = 16.78M in any practical chess position. Skip the store if the
+    // count is too large to encode (rather than silently truncating).
+    if (count > SHALLOW_PERFT_MASK) return;
+    uint64 idx = hash.lo & tt.mask;
+    uint64 entry = (hash.lo & SHALLOW_VERIF_MASK) | count;
+    asm volatile("st.global.u64 [%0], %1;" :: "l"(&tt.entries[idx]), "l"(entry));
+}
+
+#endif // __CUDACC__
+
+// -------------------------------------------------------------------------
 // Lossless chained hash table for host CPU (launch depth).
 // No entry is ever evicted — guarantees every GPU BFS result is reusable.
 // Chain entries are allocated from a flat pool (bump allocator).
@@ -179,6 +236,7 @@ inline void losslessStore(LosslessTT &tt, Hash128 hash, uint64 count)
 
 // Global TT arrays (defined in launcher.cu)
 extern TTTable deviceTTs[MAX_TT_DEPTH];   // GPU memory, indexed by remaining depth
+extern ShallowTTTable deviceShallowTT3;   // 8B-entry TT for remaining depth 3 (replaces deviceTTs[3])
 extern LosslessTT hostLosslessTTs[MAX_TT_DEPTH];  // lossless chained tables, indexed by remaining depth
 
 // Initialize TTs based on launch depth and max depth

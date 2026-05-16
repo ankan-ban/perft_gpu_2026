@@ -198,7 +198,7 @@ struct GpuBumpAllocator
 // -------------------------------------------------------------------------
 // Kernel: make move on parent board, produce child board, count child moves.
 // When useTT=true, also compute hash, probe device TT, and write hash/TT-hit counts.
-template <bool useTT>
+template <bool useTT, typename TTT>
 #if LIMIT_REGISTER_USE == 1
 __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 #endif
@@ -208,7 +208,7 @@ __global__ void makemove_and_count_moves_kernel(QuadBitBoard *parentBoards, Game
                                                  QuadBitBoard *outPositions, GameState *outStates,
                                                  Hash128 *outHashes,
                                                  int *moveCounts, uint64 *ttHitCounts,
-                                                 TTTable deviceTT,
+                                                 TTT deviceTT,
                                                  int nThreads, uint8 color)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -563,8 +563,9 @@ __global__ void reduce_by_parent(uint64 *childCounts, int *childToParent,
 // Add TT hit counts and store results in device TT
 // redirects: if non-null, skip TT store for duplicate positions (redirect >= 0)
 // to avoid overwriting the original's correct entry with the duplicate's zero
+template <typename TTT>
 __global__ void add_tt_hits_and_store(uint64 *positionCounts, uint64 *ttHitCounts,
-                                      Hash128 *posHashes, TTTable tt,
+                                      Hash128 *posHashes, TTT tt,
                                       int *redirects, int numPositions,
                                       int remainingDepth)
 {
@@ -698,29 +699,48 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
             g_lastBfsPeakMemory = alloc.peakOffset;
             return 0;
         }
-        // Step 1: make moves, compute hashes, count child moves, probe TT
+        // Step 1: make moves, compute hashes, count child moves, probe TT.
+        // At remaining depth 3 we optionally use the shallow 8B-entry TT
+        // (USE_SHALLOW_TT_DEPTH3); other depths use the 16B XOR-locked TTTable.
+        // The kernel is templated on TT type.
         int nBlocks = (currentCount - 1) / BLOCK_SIZE + 1;
-        TTTable curTT = {nullptr, 0};
-        if (g_useTT && remainingDepth >= 3 && remainingDepth < MAX_TT_DEPTH)
-            curTT = deviceTTs[remainingDepth];
-        if (g_useTT)
+#if USE_SHALLOW_TT_DEPTH3
+        if (g_useTT && remainingDepth == 3)
+        {
             makemove_and_count_moves_kernel<true><<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
                                                                            d_prevHashes,
                                                                            d_indices, d_moves,
                                                                            d_curBoards, d_curStates,
                                                                            d_curHashes,
                                                                            d_moveCounts, d_ttHitCounts,
-                                                                           curTT,
+                                                                           deviceShallowTT3,
                                                                            currentCount, levelColor);
+        }
         else
-            makemove_and_count_moves_kernel<false><<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
-                                                                            nullptr,
-                                                                            d_indices, d_moves,
-                                                                            d_curBoards, d_curStates,
-                                                                            nullptr,
-                                                                            d_moveCounts, nullptr,
-                                                                            curTT,
-                                                                            currentCount, levelColor);
+#endif
+        {
+            TTTable curTT = {nullptr, 0};
+            if (g_useTT && remainingDepth >= 3 && remainingDepth < MAX_TT_DEPTH)
+                curTT = deviceTTs[remainingDepth];
+            if (g_useTT)
+                makemove_and_count_moves_kernel<true><<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                                               d_prevHashes,
+                                                                               d_indices, d_moves,
+                                                                               d_curBoards, d_curStates,
+                                                                               d_curHashes,
+                                                                               d_moveCounts, d_ttHitCounts,
+                                                                               curTT,
+                                                                               currentCount, levelColor);
+            else
+                makemove_and_count_moves_kernel<false><<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                                                nullptr,
+                                                                                d_indices, d_moves,
+                                                                                d_curBoards, d_curStates,
+                                                                                nullptr,
+                                                                                d_moveCounts, nullptr,
+                                                                                curTT,
+                                                                                currentCount, levelColor);
+        }
 
         // BFS-level dedup: detect identical positions and skip expanding duplicates
         int *d_redirects = nullptr;
@@ -904,16 +924,30 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
             int nBlk = (currentChildCount - 1) / BLOCK_SIZE + 1;
             reduce_by_parent<<<nBlk, BLOCK_SIZE>>>(currentChildCounts, currentChildIndices,
                                                     d_parentCounts, currentChildCount);
-            // Add TT hit counts and store in device TT
-            TTTable upsweepTT = {nullptr, 0};
+            // Add TT hit counts and store in device TT. At remaining depth 3
+            // we optionally store into the shallow 8B-entry TT (USE_SHALLOW_TT_DEPTH3);
+            // otherwise the standard 16B XOR-locked TTTable.
             int rd = levelSaves[lvl].remainingDepth;
-            if (rd >= 2 && rd < MAX_TT_DEPTH)
-                upsweepTT = deviceTTs[rd];
             nBlk = (parentCount - 1) / BLOCK_SIZE + 1;
-            add_tt_hits_and_store<<<nBlk, BLOCK_SIZE>>>(d_parentCounts, levelSaves[lvl].ttHitCounts,
-                                                         levelSaves[lvl].hashes, upsweepTT,
-                                                         levelSaves[lvl].redirects, parentCount,
-                                                         rd);
+#if USE_SHALLOW_TT_DEPTH3
+            if (rd == 3)
+            {
+                add_tt_hits_and_store<<<nBlk, BLOCK_SIZE>>>(d_parentCounts, levelSaves[lvl].ttHitCounts,
+                                                             levelSaves[lvl].hashes, deviceShallowTT3,
+                                                             levelSaves[lvl].redirects, parentCount,
+                                                             rd);
+            }
+            else
+#endif
+            {
+                TTTable upsweepTT = {nullptr, 0};
+                if (rd >= 2 && rd < MAX_TT_DEPTH)
+                    upsweepTT = deviceTTs[rd];
+                add_tt_hits_and_store<<<nBlk, BLOCK_SIZE>>>(d_parentCounts, levelSaves[lvl].ttHitCounts,
+                                                             levelSaves[lvl].hashes, upsweepTT,
+                                                             levelSaves[lvl].redirects, parentCount,
+                                                             rd);
+            }
             // Apply dedup redirects: copy original's count to duplicates
             if (levelSaves[lvl].redirects)
             {

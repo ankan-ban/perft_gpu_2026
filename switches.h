@@ -33,6 +33,15 @@
 #define DEVICE_TT_BUDGET_MB 0        // GPU memory budget for device TTs (MB). 0 = auto (99% of free VRAM)
 #define HOST_TT_BUDGET_MB 0          // host memory budget for host TTs (MB). 0 = auto (90% of system RAM)
 
+// Shallow TT for remaining-depth 3 — 8B packed entry (high-40 hash | 24-bit count)
+// instead of the 16B XOR-locked TTEntry. Halves entry size (2x entries in same
+// memory budget, lower load factor) and halves probe/store bandwidth at the
+// expense of dropping hash.hi cross-verification (collision resistance 128->64
+// bit; still negligible at TT sizes <= 2^32). Depth-3 perft fits 24-bit count
+// safely (218^3 = 10.4M < 2^24).
+// Set to 0 to fall back to the regular 16B TTTable at depth 3.
+#define USE_SHALLOW_TT_DEPTH3 1
+
 // verbose diagnostics: call size/time histograms, per-BFS-level stats, progress reporting
 #define VERBOSE_LOGGING 0
 
