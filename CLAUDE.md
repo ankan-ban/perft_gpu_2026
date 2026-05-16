@@ -101,3 +101,85 @@ perft_gpu <fen> <depth> [-nott] [-dtt <MB>] [-htt <MB>] [-ld <N>] [-cpu]
 | Multithreaded CPU recursion (16 threads) | Neutral (+1.4%) | GPU calls serialized by mutex; not enough CPU work to overlap at perft 11 |
 | Batched GPU launches (depth LD+1) | -2.3% at perft 11 | Reduces ~18K GPU calls to ~600; modest win, slight regression at perft 10 |
 | 2-way set-associative device TT | Neutral (+0.8%) | Device TTs already large enough; low collision rate; extra probe load overhead |
+
+## Candidate Optimization: Parent Non-Slider Attack Cache (untried — ported from CPU repo)
+
+Inspired by commit `f240b19` in `perft_cpu_2026` ("E7: cache parent's non-slider attacks for slider-move leaves"), which gave −3.4% on the CPU version. The basis transfers to GPU; the implementation must be adapted. **Do not attempt before reading this whole section.** Branch name suggestion: `nonslider-cache`.
+
+### Theoretical basis
+
+`findAttackedSquares` (MoveGeneratorBitboard.h:835) computes 5 components: pawn shifts, knight LUT, bishop magics, rook magics, king LUT. For any position R reached from Q by a move M:
+- **Enemy slider attacks in R** depend on R's occupancy → must recompute.
+- **Enemy pawn/knight/king attack bitboards in R** depend only on enemy P/N/K piece locations. The enemy (= side that just moved) is the side that played M.
+- **Invariant**: if M did not change enemy P/N/K positions, then `nonSliderAttacks(R) == nonSliderAttacks(Q)`.
+
+A safe sufficient condition: M is a slider move (Bishop/Rook/Queen) AND M is not a promotion (promotions turn a pawn into a slider — changes enemy P bitboard). Castling fails the test (king is non-slider, also moves a rook). Pawn/knight/king moves fail. EP fails. Slider captures of *our* pieces are fine (our pieces don't enter enemy non-slider attacks).
+
+A more permissive runtime test would be `(Q.allPawns & Q.enemy) == (R.allPawns & R.enemy)` and same for knights/kings, but the static "slider-only-non-promotion" classification is free at generate time and likely captures the bulk of the win.
+
+### Where to insert
+
+| Location | What changes |
+|---|---|
+| `perft_kernels.cu:382` `fusedCountChildren<childColor>` | Compute `enemyNSAtk = pawnAttacks(enemyPawns) \| knightAttacks(enemyKnights) \| kingAttacks(enemyKing)` of `pos` ONCE before the child loop. Iterate `[0, nSliders)` with the fast path, `[nSliders, nChildMoves)` with the existing slow path. |
+| `MoveGeneratorBitboard.h:1557` `generateMoves` | Change signature to return `{nMoves, nSliderMoves}` (e.g., pack as `uint32 = (nSliders<<16) \| nMoves`). Reorder emission in `generateMovesToSink` so slider non-promotion moves come first, then everything else. |
+| `MoveGeneratorBitboard.h:1161` `generateMovesToSink` | Today's order is pawns → king → knights → bishops → rooks (1190 comment). Reorder to: bishop-non-promo → rook-non-promo → queen-non-promo → pawns → knights → king → castling → promotions. Record `nSliders` at the boundary. |
+| `MoveGeneratorBitboard.h:1700` `countMoves` | Add overload `countMoves<chance, useCachedNS>(pos, gs, cachedNSAtk)`. When `useCachedNS`, the call to `findAttackedSquares` at line 1719 is replaced with `cachedNSAtk \| multiBishopAttacks(enemyBishops, proWithKing) \| multiRookAttacks(enemyRooks, proWithKing)`. The pinned/check logic stays identical. |
+
+CMove encoding stays unchanged — all 4 flag bits are used (chess.h:120-144), so no room for a piece-type bit. Reordering the *emission* in `generateMovesToSink` is the carrier for slider-vs-non-slider classification.
+
+### Why variant B (emission reorder) over variant A (encode in CMove)
+
+Variant A (expand CMove or use a parallel piece-type array) is in the rejected list: "Piece-in-CMove (uint32) −14-23%" — doubling per-thread CMove array overwhelmed L1. Variant B keeps CMove at 2 bytes, doesn't grow the `childMoves[80]` array, and turns the classification into a *partition index* rather than per-element metadata.
+
+### Implementation steps
+
+1. **Add a new helper in MoveGeneratorBitboard.h**:
+   ```cpp
+   CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64
+   findNonSliderAttacks(uint64 enemyPawns, uint64 enemyKnights,
+                        uint64 enemyKing, uint8 enemyColor);
+   ```
+   Implementation = first/second/fifth blocks of `findAttackedSquares` only. Place adjacent to that function.
+
+2. **Reorder `generateMovesToSink`** so slider non-promotions emit first. Track count. The existing per-piece loops (bishops/rooks/queens at ~1352/1374) move to the top; pawns/king/knights move below. Castling (a king move that also moves a rook) stays on the slow side.
+
+3. **Change `generateMoves` return** to a packed `(nSliders, nMoves)` pair. Update its single caller in `perft_kernels.cu:386`. The other consumer (top-level CPU recursion in `launcher.cu:706`) needs the count too — easiest to ignore `nSliders` there and call `countMoves` without cache. Make the cache parameter optional via overload.
+
+4. **Templated `countMoves<chance, bool useCachedNS>`**: when `useCachedNS=true`, skip the non-slider attack computation in `findAttackedSquares`. Templating (not runtime flag) keeps NVCC's existing register allocation pattern intact — both specializations compile separately.
+
+5. **Update `fusedCountChildren`** to split the loop:
+   ```cpp
+   uint64 enemyNSAtk = findNonSliderAttacks(...);  // from pos
+   // ... existing generateMoves call returns {nSliders, nTotal} ...
+   for (i = 0; i < nSliders; i++) { ... countMoves<...,true>(..., enemyNSAtk); }
+   for (; i < nTotal; i++)        { ... countMoves<...,false>(...); }
+   ```
+
+6. **Verify correctness BEFORE benchmarking**:
+   - Run `-cpu` perft on startpos through depth 6 — must match known counts byte-for-byte.
+   - Run GPU `-nott` perft 8 on startpos AND on Kiwipete (CPW pos2: `r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1`) and pos3/pos4/pos5 from the standard CPW test set — must match references.
+   - Why both with and without TT: TT correctness requires perft counts to be stable; a per-leaf bug would corrupt entries and cascade.
+
+### Risks and abort criteria
+
+- **Register pressure**: extra uint64 carried into `countMoves` + extra live value in `fusedCountChildren`. Current cap is 56 regs at 75% occupancy (BLOCK_SIZE=384, MIN_BLOCKS_PER_MP=3). Check `--ptxas-options=-v` for register count. If it spills above 56, occupancy drops to 50% → likely regression. Mitigation: NVCC may recompute the cache locally if it's cheaper than spilling — but the templated path forces use of the parameter, so spills are likely. Consider passing only the pawn+knight portion and recomputing king attacks (cheap LUT) inside countMoves.
+- **NVCC codegen pathology**: project history shows that adding even a single local variable can wreck the leaf kernel (re: uint8 flags, −18×). Inspect SASS via `cuobjdump --dump-sass` on `_Z*fused_2level_leaf_kernel*` before and after. Diff for new spill instructions (`LDL`/`STL` to local memory).
+- **Loop split overhead**: two back-to-back for-loops may prevent some loop-invariant hoisting NVCC currently does on the single loop. If both lower-bound and upper-bound are computed correctly, NVCC should still fuse the prologue. Worst case: combine into one loop with a runtime `i < nSliders` branch — NVCC may predicate.
+- **Emission-order side effects**: the comment at MoveGeneratorBitboard.h:1190 explicitly notes "Generate pawn moves first. This changes fused child replay order without adding a second replay scan." → there is *prior tuning* of emission order. Pawn-first may itself be a memory-locality win because consecutive pawn children share QBB cache structure. Reordering to slider-first may regress this independently of the cache benefit. **This is the highest-risk concern.** Measure with both orderings.
+- **Castling classification**: a castling move's `from` is the king square — it must NOT be on the slider-fast path even though a rook also moves. Castling has its own flags (`CM_FLAG_KING_CASTLE`/`CM_FLAG_QUEEN_CASTLE`) — keep it in the slow segment.
+- **Promotions**: bishop/rook/queen promotions move a pawn → change enemy P bitboard if next ply is the enemy. They must be slow path. Promotion flags (CM_FLAG_PROMOTION = bit 3) are separable.
+
+**Abort if**: register count climbs above 60, SASS shows new local memory traffic in the leaf inner loop, or startpos perft 10 regresses by >0.5% with the reordering alone (no cache use) — that means the emission-order tuning was load-bearing.
+
+### Measurement protocol
+
+1. Clean rebuild after each change: `cmake --build build --clean-first --config Release`.
+2. **Sanity**: `perft_gpu <startpos> 7 -nott` matches known answer.
+3. **Order-only A/B**: implement the emission reorder WITHOUT the cache. Measure perft 10 and perft 11. If regression > 0.5%, the emission order is load-bearing — try keeping pawns first and grouping sliders separately at the end of emission (and adjusting indices accordingly).
+4. **Cache enabled**: enable the templated `useCachedNS=true` path. Measure perft 10 and perft 11 startpos, no TT and with TT. Three runs each, take min.
+5. **Compare**: target is ≥1% improvement at perft 11 (TT-enabled). Anything less and the risk/code-complexity ratio doesn't justify keeping it.
+6. **Profile**: if neutral or marginal, profile with Nsight Compute on the fused leaf kernel — look at SM_INST_EXECUTED_PIPE_ALU and LSU pipe utilization deltas. If ALU dropped without LSU rising, the cache is working at the instruction level even if wall-time is hidden by latency.
+
+### What success looks like
+A net 1-3% improvement at perft 11/12, no SASS spills, correctness across the CPW test set. Update the table above and the Rejected Optimizations table appropriately; if accepted, document the slider-first emission order as a constraint future refactors must preserve.
