@@ -18,10 +18,12 @@ See `README.md` for project overview, usage, CLI flags, file overview, build ins
 - Combined magic entry struct: mask+factor co-located for single cache-line access
 - Pure CPU path (`-cpu`) is template-specialized, countMoves at leaf
 - **Transposition tables** (runtime toggle via `g_useTT` / `-nott` CLI flag):
-  - 128-bit Zobrist hash, separate TT per depth, XOR lockless 16-byte entries
-  - Device TTs (depths 3..launchDepth-1): probed in GPU BFS downsweep, stored via upsweep
-  - Host TTs (depths launchDepth..maxDepth): lossless chained tables, probed/stored in CPU recursion
-  - `makemove_and_count_moves_kernel<bool useTT>` templated for zero overhead when TT disabled
+  - 128-bit Zobrist hash, separate TT per remaining depth
+  - **Depth 2 (leaf TT)**: 16B XOR-locked `TTEntry`, probed inside `fused_2level_leaf_kernel` (gated by `HASH_IN_LEAF_KERNEL`)
+  - **Depth 3 (shallow TT)**: 8B packed entry `{hash.lo[63:24] | count[23:0]}` — half the entry size, 2× capacity per byte (gated by `USE_SHALLOW_TT_DEPTH3`). 24-bit count safe (218³ ≈ 10.4M < 2²⁴). Probe is `ld.global.u64`, store is `st.global.u64`. Drops `hash.hi` cross-check (collision resistance 128-bit → 64-bit, still negligible at TT sizes ≤ 2³²).
+  - **Depths 4..launchDepth-1**: 16B XOR-locked `TTEntry` — probed in GPU BFS downsweep, stored via upsweep
+  - **Host TTs (depths launchDepth..maxDepth)**: lossless chained tables, probed/stored in CPU recursion
+  - `makemove_and_count_moves_kernel<bool useTT, typename TTT>` and `add_tt_hits_and_store<typename TTT>` are templated on TT type; overload-resolved `ttProbe`/`ttStore` pick the right path per depth. Zero overhead when TT disabled.
   - Upsweep result is authoritative (leaf global atomic misses TT-hit subtrees)
 
 ## Benchmarking
@@ -32,9 +34,9 @@ See `README.md` for project overview, usage, CLI flags, file overview, build ins
 ## Key Design Decisions
 - **LD never increases dynamically** — root perft(N) memory does NOT predict worst-case perft(N+1) from arbitrary positions. LD can only decrease on OOM.
 - **OOM fallback** — all BFS OOM paths signal `g_lastBfsOom`, caller falls back to CPU recursion at depth-1. Never return wrong results from OOM — they poison TTs.
-- **Block size 384, MIN_BLOCKS_PER_MP=3** — extensively tested, optimal for 56 registers / 75% occupancy
-- **HASH_IN_LEAF_KERNEL disabled** — 35% regression; fused 2-level leaf architecture incompatible with efficient leaf-level hashing
-- **VERBOSE_LOGGING** (switches.h) — WIP, code does NOT build with VERBOSE_LOGGING=0
+- **Block size 416, MIN_BLOCKS_PER_MP=3** — extensively tested on Blackwell (RTX PRO 6000); was 384 on older chips
+- **HASH_IN_LEAF_KERNEL ENABLED** — +7% on startpos perft 10 (2.14s → 2.00s, 3-run avg, Blackwell). The historical -35% rejection predates current code: leaf TT[2] now allocates 32 GB (auto-budget) and hit rate is high enough to pay for the extra hash update per leaf thread. Skipping it leaves 32 GB of VRAM idle — the other TTs cap out at 8 GB per slot regardless.
+- **VERBOSE_LOGGING** (switches.h) — gates call-size/time histograms, host TT hit-rate counters, per-BFS-level position counts, progress reporting. Both `=0` (default, lean release) and `=1` (diagnostic) build cleanly.
 
 ## GPU Optimization Lessons
 - NVCC is extremely sensitive to source-level patterns — "optimizing" code can trigger regressions
@@ -66,7 +68,6 @@ See `README.md` for project overview, usage, CLI flags, file overview, build ins
 | Unfused bfsMinLevel=2 | -52% / OOM | Massive BFS arrays at level 2 |
 | Dynamic LD increase 8->9 | -75% at perft 12 | OOMs from non-root positions + TT dilution |
 | Multi-stream (2 workers) | -2-9% | SM contention, worsens with depth |
-| HASH_IN_LEAF_KERNEL | -35% | Hash overhead for all threads, low hit rate at depth 2 |
 | Segmented upsweep | -1% | Fewer threads, atomicAdd not a bottleneck |
 | CUDA streams (no threading) | -1.6% | Stream sync overhead > savings |
 | Cached ~b inversions | Neutral | Prevents LOP3.LUT fusion |
@@ -82,6 +83,8 @@ See `README.md` for project overview, usage, CLI flags, file overview, build ins
 
 ## Accepted optimizations (with measurement notes)
 
+- **Shallow 8B TT entry at remaining-depth 3** (`tt.h` `ShallowTTTable`, `USE_SHALLOW_TT_DEPTH3` switch). Packs `{hash.lo[63:24] | count[23:0]}` into a single uint64, halving entry size vs the 16B XOR-locked `TTEntry`. In the same 8 GB byte budget the table holds 1024M entries instead of 512M — lower load factor + halved probe/store bandwidth (single `ld.global.u64`/`st.global.u64`). Win: -2.8% on startpos perft 10 (2.089s → 2.031s, 3-run avg, Blackwell). 24-bit count is safe at depth 3 (218³ ≈ 10.4M < 2²⁴); store skipped if count overflows (never silently truncates). Toggleable via `USE_SHALLOW_TT_DEPTH3=0` to fall back to 16B `TTEntry`. NOT safe to apply at depth ≥ 4 (218⁴ ≈ 2.3B > 2²⁴).
+- **HASH_IN_LEAF_KERNEL (leaf TT at remaining-depth 2)** (`switches.h:HASH_IN_LEAF_KERNEL=1`). The fused 2-level leaf kernel probes/stores `deviceTTs[2]` (16B XOR-locked, auto-sized to ~32 GB on Blackwell). Win: +7% on startpos perft 10 (2.14s → 2.00s, 3-run avg). Hit rate at depth 2 is high enough to offset the per-leaf-thread hash update + probe cost. The leaf TT alloc takes ~32 GB of an ~78 GB device-TT budget; disabling it leaves that VRAM unused (other TTs cap at 8 GB/slot regardless), so the choice is "use it or waste it".
 - **BLSR (`bb &= bb - 1`) replacing `bb ^= piece` in countMoves outer piece loops** (`MoveGeneratorBitboard.h:1876-1940`, knight + pinned/unpinned bishop + pinned/unpinned rook). Win: -1.5% on pos2 perft 7 -nott. NCU: warp cycles per issued inst 12.45 -> 12.42, SM throughput 68.41 -> 68.59%. `getOne`+`bitScanOne` are preserved (full `getOne/bitScan elimination` regresses 18x because NVCC relies on those primitives).
 - **BLSR replacing `Moves ^= dst` in generateMovesToSink/generateMovesOutOfCheck inner destination-iteration emit loops** (10 sites total). Win: an additional -0.3% on top of the prior change. NCU: executed instructions drop 247.76B -> 247.32B (-0.18%); savings compound across the BFS.
 - Cumulative effect: ~1.5% wall-clock improvement across pos2 perft 7 (both -nott and TT) and startpos perft 10 TT. Confirmed via direct A/B against the prior commit.
