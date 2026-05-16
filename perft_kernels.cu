@@ -402,14 +402,14 @@ __device__ __forceinline__ int fusedCountChildren(QuadBitBoard pos, GameState gs
 // Saves massive memory (no need for the huge move/index arrays of the last
 // BFS level) and improves cache locality (siblings processed together).
 // -------------------------------------------------------------------------
-template <bool useTT>
+template <bool useTT, typename TTT>
 __launch_bounds__(BLOCK_SIZE, MIN_BLOCKS_PER_MP)
 __global__ void fused_2level_leaf_kernel(QuadBitBoard *positions, GameState *states,
                                           Hash128 *hashes,
                                           int *indices, CMove *moves,
                                           uint64 *globalPerftCounter,
                                           uint64 *perThreadCounts,
-                                          TTTable leafTT,
+                                          TTT leafTT,
                                           int nThreads, uint8 color)
 {
     uint32 index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -850,11 +850,13 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
             return 0;
         }
     }
-    // Determine leaf TT (for fused kernel, remaining depth = bfsMinLevel - 1)
+    // Determine leaf TT (for fused kernel, remaining depth = bfsMinLevel - 1).
+    // When USE_SHALLOW_TT_DEPTH2 is enabled and we're at remaining depth 2, use
+    // the shallow 8B-entry table; otherwise the standard 16B XOR-locked TTTable.
+    int leafRemDepth = bfsMinLevel - 1;
     TTTable leafTT = {nullptr, 0};
     if (g_useTT && HASH_IN_LEAF_KERNEL)
     {
-        int leafRemDepth = bfsMinLevel - 1;
         if (leafRemDepth >= 2 && leafRemDepth < MAX_TT_DEPTH)
             leafTT = deviceTTs[leafRemDepth];
     }
@@ -862,6 +864,19 @@ uint64 perft_gpu_host_bfs(QuadBitBoard *pos, GameState *gs, uint8 rootColor, int
         int nBlocks = (currentCount - 1) / BLOCK_SIZE + 1;
         if (use2LevelLeaf)
         {
+#if USE_SHALLOW_TT_DEPTH2 && HASH_IN_LEAF_KERNEL
+            if (g_useTT && leafRemDepth == 2)
+            {
+                fused_2level_leaf_kernel<true><<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
+                                                                         d_prevHashes,
+                                                                         d_indices, d_moves,
+                                                                         d_perftCounter,
+                                                                         d_leafCounts,
+                                                                         deviceShallowTT2,
+                                                                         currentCount, levelColor);
+            }
+            else
+#endif
             if (g_useTT)
                 fused_2level_leaf_kernel<true><<<nBlocks, BLOCK_SIZE>>>(d_prevBoards, d_prevStates,
                                                                          d_prevHashes,

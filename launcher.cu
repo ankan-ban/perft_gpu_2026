@@ -27,6 +27,7 @@ bool g_useTT = true;
 
 // Global TT arrays
 TTTable deviceTTs[MAX_TT_DEPTH];
+ShallowTTTable deviceShallowTT2 = {nullptr, 0};
 ShallowTTTable deviceShallowTT3 = {nullptr, 0};
 LosslessTT hostLosslessTTs[MAX_TT_DEPTH];
 
@@ -130,6 +131,7 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFa
         return;
 
     memset(deviceTTs, 0, sizeof(deviceTTs));
+    deviceShallowTT2 = {nullptr, 0};
     deviceShallowTT3 = {nullptr, 0};
     memset(hostLosslessTTs, 0, sizeof(hostLosslessTTs));
 
@@ -161,11 +163,33 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFa
         // Optional depth-2 TT for the fused 2-level leaf. Reserve it before
         // weighting the deeper BFS TTs so the final split is explicit and
         // power-of-two rounding preserves the important depth 3..7 tables.
+        // Allocates either the shallow 8B-entry table (USE_SHALLOW_TT_DEPTH2)
+        // or the regular 16B XOR-locked TTEntry table — same byte budget either
+        // way; shallow gives 2x entries.
 #if HASH_IN_LEAF_KERNEL
-        const uint64 leafEntries = 2048ull * 1024 * 1024;
-        const uint64 leafBytes = leafEntries * sizeof(TTEntry);
+        const uint64 leafBytes = 32ull * 1024 * 1024 * 1024;  // 32 GB
         if (budgetBytes > leafBytes)
         {
+#if USE_SHALLOW_TT_DEPTH2
+            const uint64 leafEntries = leafBytes / sizeof(uint64);
+            cudaError_t err = cudaMalloc(&deviceShallowTT2.entries, leafBytes);
+            if (err == cudaSuccess)
+            {
+                cudaMemset(deviceShallowTT2.entries, 0, leafBytes);
+                deviceShallowTT2.mask = leafEntries - 1;
+                budgetBytes -= leafBytes;
+                printf("Device TT[2] (shallow): %lluM entries (%llu MB)\n",
+                       (unsigned long long)(leafEntries / (1024*1024)),
+                       (unsigned long long)(leafBytes / (1024*1024)));
+            }
+            else
+            {
+                printf("Warning: failed to allocate device shallow TT[2] (%llu MB): %s\n",
+                       (unsigned long long)(leafBytes / (1024*1024)),
+                       cudaGetErrorString(err));
+            }
+#else
+            const uint64 leafEntries = leafBytes / sizeof(TTEntry);
             cudaError_t err = cudaMalloc(&deviceTTs[2].entries, leafBytes);
             if (err == cudaSuccess)
             {
@@ -182,6 +206,7 @@ void initTT(int launchDepth, int maxLaunchDepth, int maxDepth, float branchingFa
                        (unsigned long long)(leafBytes / (1024*1024)),
                        cudaGetErrorString(err));
             }
+#endif
         }
 #endif
 
@@ -471,6 +496,8 @@ void clearDeviceTTs()
         if (deviceTTs[d].entries)
             cudaMemset(deviceTTs[d].entries, 0, (deviceTTs[d].mask + 1) * sizeof(TTEntry));
     }
+    if (deviceShallowTT2.entries)
+        cudaMemset(deviceShallowTT2.entries, 0, (deviceShallowTT2.mask + 1) * sizeof(uint64));
     if (deviceShallowTT3.entries)
         cudaMemset(deviceShallowTT3.entries, 0, (deviceShallowTT3.mask + 1) * sizeof(uint64));
 }
@@ -490,6 +517,11 @@ void freeTT()
         free(hostLosslessTTs[d].buckets);
         free(hostLosslessTTs[d].pool);
         memset(&hostLosslessTTs[d], 0, sizeof(LosslessTT));
+    }
+    if (deviceShallowTT2.entries)
+    {
+        cudaFree(deviceShallowTT2.entries);
+        deviceShallowTT2 = {nullptr, 0};
     }
     if (deviceShallowTT3.entries)
     {

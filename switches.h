@@ -42,6 +42,13 @@
 // Set to 0 to fall back to the regular 16B TTTable at depth 3.
 #define USE_SHALLOW_TT_DEPTH3 1
 
+// Same packing for the leaf TT at remaining-depth 2 (used by the fused 2-level
+// leaf kernel when HASH_IN_LEAF_KERNEL=1). Depth-2 count fits even more easily
+// (218^2 = ~47K, well under 2^24). Same byte budget as the 16B TT[2] yields 2x
+// entries and halved probe/store bandwidth in the hottest GPU kernel.
+// Set to 0 to fall back to the regular 16B TTTable at depth 2.
+#define USE_SHALLOW_TT_DEPTH2 1
+
 // verbose diagnostics: call size/time histograms, per-BFS-level stats, progress reporting
 #define VERBOSE_LOGGING 0
 
