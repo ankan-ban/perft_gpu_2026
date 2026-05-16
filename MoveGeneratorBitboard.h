@@ -1015,7 +1015,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
 
             // TODO: set capture flag correctly
             addCompactMove(&nMoves, &genMoves, kingIndex, bitScanOne(dst), 0);
-            kingMoves ^= dst;
+            kingMoves &= kingMoves - 1;
         }
 
 
@@ -1104,7 +1104,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
                     uint64 dst = getOne(knightMoves);
                     // TODO: set capture flag correctly
                     addCompactMove(&nMoves, &genMoves, knightIndex, bitScanOne(dst), 0);
-                    knightMoves ^= dst;
+                    knightMoves &= knightMoves - 1;
                 }
                 myKnights ^= knight;
             }
@@ -1121,7 +1121,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
                 {
                     uint64 dst = getOne(bishopMoves);
                     addCompactMove(&nMoves, &genMoves, bishopIndex, bitScanOne(dst), 0);
-                    bishopMoves ^= dst;
+                    bishopMoves &= bishopMoves - 1;
                 }
                 bishops ^= bishop;
             }
@@ -1139,7 +1139,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
                     uint64 dst = getOne(rookMoves);
                     // TODO: set capture flag correctly
                     addCompactMove(&nMoves, &genMoves, rookIndex, bitScanOne(dst), 0);
-                    rookMoves ^= dst;
+                    rookMoves &= rookMoves - 1;
                 }
                 rooks ^= rook;
             }
@@ -1300,7 +1300,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
         {
             uint64 dst = getOne(kingMoves);
             addCompactMove(&nMoves, &genMoves, kingIndex, bitScanOne(dst), normalMoveFlag(dst, enemyPieces));
-            kingMoves ^= dst;
+            kingMoves &= kingMoves - 1;
         }
 
         // generate knight moves (only non-pinned knights can move)
@@ -1314,7 +1314,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             {
                 uint64 dst = getOne(knightMoves);
                 addCompactMove(&nMoves, &genMoves, knightIndex, bitScanOne(dst), normalMoveFlag(dst, enemyPieces));
-                knightMoves ^= dst;
+                knightMoves &= knightMoves - 1;
             }
             myKnights ^= knight;
         }
@@ -1338,7 +1338,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             {
                 uint64 dst = getOne(bishopMoves);
                 addCompactMove(&nMoves, &genMoves, bishopIndex, bitScanOne(dst), normalMoveFlag(dst, enemyPieces));
-                bishopMoves ^= dst;
+                bishopMoves &= bishopMoves - 1;
             }
             bishops ^= bishop;
         }
@@ -1355,7 +1355,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             {
                 uint64 dst = getOne(bishopMoves);
                 addCompactMove(&nMoves, &genMoves, bishopIndex, bitScanOne(dst), normalMoveFlag(dst, enemyPieces));
-                bishopMoves ^= dst;
+                bishopMoves &= bishopMoves - 1;
             }
             bishops ^= bishop;
 
@@ -1378,7 +1378,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             {
                 uint64 dst = getOne(rookMoves);
                 addCompactMove(&nMoves, &genMoves, rookIndex, bitScanOne(dst), normalMoveFlag(dst, enemyPieces));
-                rookMoves ^= dst;
+                rookMoves &= rookMoves - 1;
             }
             rooks ^= rook;
         }
@@ -1395,7 +1395,7 @@ CUDA_CALLABLE_MEMBER CPU_FORCE_INLINE static uint64 multiKnightAttacks(uint64 kn
             {
                 uint64 dst = getOne(rookMoves);
                 addCompactMove(&nMoves, &genMoves, rookIndex, bitScanOne(dst), normalMoveFlag(dst, enemyPieces));
-                rookMoves ^= dst;
+                rookMoves &= rookMoves - 1;
             }
             rooks ^= rook;
         }
