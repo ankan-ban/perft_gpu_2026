@@ -55,11 +55,12 @@ With transposition tables enabled and lossless host TTs:
 
 | Position | Depth | Nodes | Time | Speed |
 |---|---|---|---|---|
-| Starting position | 9 | 2,439,530,234,167 | 0.174s | ~14,001 billion nps |
-| Starting position | 10 | 69,352,859,712,417 | 2.041s | ~33,975 billion nps |
-| Starting position | 11 | 2,097,651,003,696,806 | 24.38s | ~86,046 billion nps |
-| Starting position | 12 | 62,854,969,236,701,747 | 374.1s | ~167,996 billion nps |
+| Starting position | 9 | 2,439,530,234,167 | 0.174s | ~14,004 billion nps |
+| Starting position | 10 | 69,352,859,712,417 | 2.040s | ~33,989 billion nps |
+| Starting position | 11 | 2,097,651,003,696,806 | 24.33s | ~86,226 billion nps |
+| Starting position | 12 | 62,854,969,236,701,747 | 373.6s | ~168,224 billion nps |
 | Starting position | 13 | 1,981,066,775,000,396,239 | 5,664.9s | ~349,708 billion nps |
+| Starting position | 14 | 61,885,021,521,585,529,237 | 99,956.6s | ~619,119 billion nps |
 
 ### NVIDIA RTX 4090
 
